@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="description" content="Faltwerk playback demo — stream 4D Gaussian holograms in the browser and on Quest 3.">
+<meta name="description" content="A WebGPU / WebXR demo of Faltwerk.">
 <title>4DGS Holograms</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -29,24 +29,22 @@
     position: fixed; inset: 0;
     width: 100vw; height: 100vh;
     display: block; touch-action: none;
-    background:
-      radial-gradient(120% 80% at 70% 10%, rgba(200, 241, 53, 0.05), transparent 50%),
-      radial-gradient(90% 70% at 10% 90%, rgba(80, 120, 140, 0.12), transparent 45%),
-      #070809;
+    background: #070809;
   }
 
+  /* Transparent chrome over the live player — no scrim. */
   #intro {
     position: fixed; inset: 0; z-index: 20;
     display: grid;
     align-content: end;
     padding: clamp(1.25rem, 4vw, 3rem);
     padding-bottom: max(2rem, env(safe-area-inset-bottom));
-    background:
-      linear-gradient(180deg, rgba(7, 8, 9, 0.15) 0%, rgba(7, 8, 9, 0.55) 45%, rgba(7, 8, 9, 0.92) 100%);
-    pointer-events: auto;
+    background: transparent;
+    pointer-events: none;
     transition: opacity 420ms ease, visibility 420ms ease;
   }
   #intro.is-gone { opacity: 0; visibility: hidden; pointer-events: none; }
+  #intro .hit { pointer-events: auto; }
 
   .brand {
     font-family: var(--font-display);
@@ -56,14 +54,15 @@
     line-height: 0.92;
     margin: 0 0 0.85rem;
     max-width: 11ch;
-    animation: rise 700ms cubic-bezier(.2,.8,.2,1) both;
+    color: #fff;
+    text-shadow: 0 1px 18px rgba(0, 0, 0, 0.55);
   }
   .lede {
-    max-width: 34rem;
+    max-width: 36rem;
     margin: 0 0 1.4rem;
     color: var(--mute);
     font-size: clamp(0.92rem, 2.2vw, 1.05rem);
-    animation: rise 700ms cubic-bezier(.2,.8,.2,1) 80ms both;
+    text-shadow: 0 1px 12px rgba(0, 0, 0, 0.55);
   }
   .lede a { color: var(--ink); text-decoration: underline; text-underline-offset: 0.18em; }
   .lede a:hover { color: var(--accent); }
@@ -71,7 +70,7 @@
   .authors {
     display: flex; flex-wrap: wrap; gap: 0.85rem 1.5rem;
     margin: 0 0 1.6rem;
-    animation: rise 700ms cubic-bezier(.2,.8,.2,1) 140ms both;
+    text-shadow: 0 1px 12px rgba(0, 0, 0, 0.55);
   }
   .authors span { color: var(--mute); }
   .authors strong { color: var(--ink); font-weight: 500; }
@@ -80,7 +79,6 @@
 
   .actions {
     display: flex; flex-wrap: wrap; gap: 0.7rem;
-    animation: rise 700ms cubic-bezier(.2,.8,.2,1) 200ms both;
   }
   .actions a, .actions button {
     appearance: none; border: 0; cursor: pointer;
@@ -88,7 +86,7 @@
     letter-spacing: 0.02em;
     padding: 0.85rem 1.15rem;
     text-decoration: none;
-    transition: transform 160ms ease, background 160ms ease, color 160ms ease;
+    transition: transform 160ms ease, filter 160ms ease, outline-color 160ms ease;
   }
   .actions a:active, .actions button:active { transform: translateY(1px); }
   .btn-primary { background: var(--accent); color: var(--accent-ink); }
@@ -108,9 +106,9 @@
     color: var(--ink);
     pointer-events: none;
     opacity: 0;
-    transition: opacity 360ms ease 120ms;
+    transition: opacity 360ms ease;
   }
-  body.is-playing #hud { opacity: 1; }
+  body.is-chrome-clear #hud { opacity: 1; }
   #hud button, #hud label, #hud select, #hud summary, #hud a, #hud input {
     pointer-events: auto;
   }
@@ -180,12 +178,10 @@
     max-width: min(28rem, calc(100vw - 1.5rem));
     pointer-events: none;
     opacity: 0;
-    transform: translateY(6px);
-    transition: opacity 400ms ease 180ms, transform 400ms ease 180ms;
+    transition: opacity 360ms ease;
   }
-  body.is-playing #credit {
+  body.is-chrome-clear #credit {
     opacity: 1;
-    transform: none;
     pointer-events: auto;
   }
   #credit .mark {
@@ -218,36 +214,33 @@
   }
   #about-btn:hover { color: var(--accent); }
 
-  @keyframes rise {
-    from { opacity: 0; transform: translateY(14px); }
-    to { opacity: 1; transform: none; }
-  }
-
   @media (max-width: 640px) {
     #stats { display: none; }
     .brand { max-width: 9ch; }
   }
 </style>
 </head>
-<body class="is-playing">
+<body>
 <canvas id="c"></canvas>
 
-<section id="intro" class="is-gone" aria-label="About this demo" hidden>
-  <h1 class="brand">4DGS Holograms</h1>
-  <p class="lede">
-    A WebGPU / WebXR demo of
-    <a href="https://github.com/edrethardo/Faltwerk">Faltwerk</a>
-  </p>
-  <div class="authors">
-    <div><span>Authors</span><br><strong>James Kane</strong> · <strong>Aaron Nowak</strong></div>
-    <div><span>Codec</span><br><strong>Faltwerk</strong></div>
-    <div><span>Capture</span><br><strong>iPhone Air</strong></div>
-    <div><span>Processing</span><br><a href="https://github.com/ant-research/4DAnyone" target="_blank" rel="noopener"><strong>4DAnyone</strong></a></div>
-  </div>
-  <div class="actions">
-    <button type="button" class="btn-primary" id="enter">Back to viewer</button>
-    <a class="btn-ghost" id="quest-link" href="?quest=1">Quest 3 MR</a>
-    <a class="btn-ghost" href="https://github.com/edrethardo/Faltwerk" target="_blank" rel="noopener">Main repo</a>
+<section id="intro" aria-label="About this demo">
+  <div class="hit">
+    <h1 class="brand">4DGS Holograms</h1>
+    <p class="lede">
+      A WebGPU / WebXR demo of
+      <a href="https://github.com/edrethardo/Faltwerk">Faltwerk</a>
+    </p>
+    <div class="authors">
+      <div><span>Authors</span><br><strong>Aaron Nowak</strong> · <strong>James Kane</strong></div>
+      <div><span>Codec</span><br><a href="https://github.com/edrethardo/Faltwerk" target="_blank" rel="noopener"><strong>Faltwerk</strong></a></div>
+      <div><span>Capture</span><br><strong>iPhone Air</strong></div>
+      <div><span>Processing</span><br><a href="https://github.com/ant-research/4DAnyone" target="_blank" rel="noopener"><strong>4DAnyone</strong></a></div>
+    </div>
+    <div class="actions">
+      <button type="button" class="btn-primary" id="enter">Enter viewer</button>
+      <a class="btn-ghost" id="quest-link" href="?quest=1">Quest 3 MR</a>
+      <a class="btn-ghost" href="https://github.com/edrethardo/Faltwerk" target="_blank" rel="noopener">Main repo</a>
+    </div>
   </div>
 </section>
 
@@ -281,21 +274,21 @@
 
 <aside id="credit">
   <p class="mark">4DGS Holograms</p>
-  <p>James Kane · Aaron Nowak · <a href="https://github.com/edrethardo/Faltwerk" target="_blank" rel="noopener">Faltwerk</a></p>
+  <p>Aaron Nowak · James Kane · <a href="https://github.com/edrethardo/Faltwerk" target="_blank" rel="noopener">Faltwerk</a></p>
   <button type="button" id="about-btn">About</button>
 </aside>
 
 <script>
   const intro = document.getElementById('intro');
-  const showAbout = (on) => {
-    intro.hidden = !on;
+  const showLanding = (on) => {
     intro.classList.toggle('is-gone', !on);
-    document.body.classList.toggle('is-playing', !on);
+    document.body.classList.toggle('is-chrome-clear', !on);
   };
-  document.getElementById('enter').addEventListener('click', () => showAbout(false));
-  document.getElementById('about-btn').addEventListener('click', () => showAbout(true));
-  const quest = document.getElementById('quest-link');
-  quest.href = location.pathname.replace(/\/?$/, '/') + '?quest=1';
+  document.getElementById('enter').addEventListener('click', () => showLanding(false));
+  document.getElementById('about-btn').addEventListener('click', () => showLanding(true));
+  // Quest deep-link goes straight to controls.
+  if (new URLSearchParams(location.search).has('quest')) showLanding(false);
+  document.getElementById('quest-link').href = location.pathname.replace(/\/?$/, '/') + '?quest=1';
 </script>
 <script type="module" src="./main.js"></script>
 </body>
