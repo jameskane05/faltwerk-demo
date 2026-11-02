@@ -124,7 +124,7 @@
   }
   #hud button:hover, #grade-box summary:hover { border-color: rgba(232, 228, 220, 0.35); }
   #hud label { display: inline-flex; align-items: center; gap: 0.35rem; color: var(--mute); }
-  #hud label:has(#camviz) {
+  #hud label:has(#camviz), #hud label:has(#orbit) {
     background: var(--panel);
     color: var(--ink);
     border: 1px solid var(--line);
@@ -133,7 +133,7 @@
     gap: 0.45rem;
     cursor: pointer;
   }
-  #hud label:has(#camviz):hover { border-color: rgba(232, 228, 220, 0.35); }
+  #hud label:has(#camviz):hover, #hud label:has(#orbit):hover { border-color: rgba(232, 228, 220, 0.35); }
   #hold[aria-expanded="true"] { border-color: rgba(232, 228, 220, 0.55); }
   .color-settings { position: relative; }
   #grade-box {
@@ -144,13 +144,13 @@
     background: transparent; vertical-align: middle;
   }
   #hud input[type=checkbox] { accent-color: var(--accent); margin: 0; }
-  #hud label:has(#camviz) input {
+  #hud label:has(#camviz) input, #hud label:has(#orbit) input {
     appearance: none;
     width: 0.8rem; height: 0.8rem;
     border: 1px solid rgba(232, 228, 220, 0.55);
     background: transparent center / 0.7rem no-repeat;
   }
-  #hud label:has(#camviz) input:checked {
+  #hud label:has(#camviz) input:checked, #hud label:has(#orbit) input:checked {
     background-color: var(--ink);
     border-color: var(--ink);
     background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><path d='M2 6.2 4.6 9 10 3' fill='none' stroke='%2312140e' stroke-width='2'/></svg>");
@@ -188,6 +188,9 @@
   #grade-panel .bg-pick input[type=color]::-moz-color-swatch { border: none; }
   #grade-panel .bg-pick #bg-hex {
     color: var(--ink); font: 500 12px/1 var(--font-mono); letter-spacing: 0.02em;
+  }
+  #grade-panel > div:has(#grade-reset) {
+    display: flex; justify-content: flex-end; margin: 0 0 0.15rem;
   }
   #grade-rows { display: grid; gap: 0.2rem; margin-top: 0.45rem; }
   #grade-rows label {
@@ -237,6 +240,7 @@
       <div><span>FPS</span><strong id="stat-fps">…</strong></div>
       <div><span>GPU</span><strong id="stat-gpu">…</strong></div>
       <div><span>Bitrate</span><strong id="stat-mbps">…</strong></div>
+      <div><span>Size</span><strong id="stat-bytes">…</strong></div>
       <div><span>Splats <em>(total · drawn)</em></span><strong id="stat-splats">…</strong></div>
     </div>
     <div id="hud" class="hit">
@@ -247,12 +251,6 @@
           <div id="grade-panel">
             <label class="bg-row"><span data-de="Hintergrundfarbe">Background Color</span><span class="bg-pick"><input id="bg" type="color" value="#d9d4cc" aria-label="Background color"><span id="bg-hex">#d9d4cc</span></span></label>
             <div>
-            <label title="Estimate a grade from the headset's room camera when MR starts; moving any slider switches back to manual" data-de-title="Schätzt beim MR-Start eine Farbkorrektur aus der Raumkamera; jeder Regler schaltet zurück auf manuell">
-              <input id="recolor" type="checkbox"><span data-de="Auto aus Raum">Auto from room</span>
-            </label>
-            <label id="desk-box" hidden title="Pinchable slider desk next to you in MR; pinch its tray to carry it" data-de-title="Greifbares Reglerpult neben dir in MR; am Brett greifen, um es zu tragen">
-              <input id="desk" type="checkbox" checked><span data-de="Pult in MR">Desk in MR</span>
-            </label>
             <button id="grade-reset" type="button" data-de="Zurücksetzen">Reset</button>
           </div>
           <div id="grade-rows"></div>
@@ -261,6 +259,7 @@
       </div>
       <select id="scene" hidden></select>
       <label title="Show capture-camera frustums and view thumbnails around the subject"><input id="camviz" type="checkbox" checked><span>Cameras</span></label>
+      <label title="Orbit from the current angle and distance. Click-drag pauses it; it resumes after 15s idle. Zoom keeps it going."><input id="orbit" type="checkbox" checked><span data-de="Animation">Animate</span></label>
       <span id="occ-box" hidden><input id="occ" type="checkbox" checked></span>
       <span id="occ-debug-box" hidden><input id="occ-debug" type="checkbox"></span>
       <span id="recolor-info"></span>
@@ -283,6 +282,7 @@
 
   const sizeCache = new Map();
   const mbpsEl = document.getElementById('stat-mbps');
+  const bytesEl = document.getElementById('stat-bytes');
   async function sectionBytes(url) {
     if (sizeCache.has(url)) return sizeCache.get(url);
     let n = 0;
@@ -301,9 +301,12 @@
     return n;
   }
 
-  async function updateBitrate(sceneName) {
-    if (!sceneName || !mbpsEl) return;
-    mbpsEl.textContent = '…';
+  let clipGen = 0;
+  let shownScene = '';
+  async function updateClipStats(sceneName) {
+    const mine = ++clipGen;
+    if (mbpsEl) mbpsEl.textContent = '…';
+    if (bytesEl) bytesEl.textContent = '…';
     try {
       const sc = await (await fetch(sceneName, { cache: 'no-store' })).json();
       const secs = Array.isArray(sc.sections) ? sc.sections : [];
@@ -313,24 +316,32 @@
         frames += Number(s.nframes) || 0;
         bytes += await sectionBytes(s.url);
       }
+      if (mine !== clipGen) return;
       const sec = frames > 0 && fps > 0 ? frames / fps : 0;
-      if (!bytes || !sec) { mbpsEl.textContent = '—'; return; }
+      if (!bytes || !sec) {
+        if (mbpsEl) mbpsEl.textContent = '—';
+        if (bytesEl) bytesEl.textContent = '—';
+        return;
+      }
       const mbps = (bytes * 8) / sec / 1e6;
-      mbpsEl.textContent = (mbps >= 10 ? mbps.toFixed(1) : mbps.toFixed(2)) + ' Mbit/s';
+      if (mbpsEl) mbpsEl.textContent = (mbps >= 10 ? mbps.toFixed(1) : mbps.toFixed(2)) + ' Mbit/s';
+      if (bytesEl) bytesEl.textContent = (bytes / 1048576).toFixed(2) + ' MiB';
     } catch {
-      mbpsEl.textContent = '—';
+      if (mine !== clipGen) return;
+      if (mbpsEl) mbpsEl.textContent = '—';
+      if (bytesEl) bytesEl.textContent = '—';
     }
   }
 
   const sceneSel = document.getElementById('scene');
-  const watchScene = () => { if (sceneSel?.value) updateBitrate(sceneSel.value); };
-  sceneSel?.addEventListener('change', watchScene);
-  let tries = 0;
-  const boot = setInterval(() => {
-    tries++;
-    if (sceneSel?.options.length) { watchScene(); clearInterval(boot); }
-    else if (tries > 80) clearInterval(boot);
-  }, 100);
+  // The player swaps clips by assigning select.value, which does not fire change.
+  const watchScene = () => {
+    const v = sceneSel && sceneSel.value;
+    if (!v || v === shownScene) return;
+    shownScene = v;
+    updateClipStats(v);
+  };
+  sceneSel?.addEventListener('change', () => { shownScene = ''; watchScene(); });
 
   // Mirror player #stats → bottom perf row.
   // Format: "… · 60 fps · section 0 t=12.34 · 135000 splats (12000 visible) · GPU 4.20 ms · 256 MiB"
@@ -356,7 +367,7 @@
   };
   const mo = new MutationObserver(() => applyStats(statsNode.textContent || ''));
   mo.observe(statsNode, { characterData: true, childList: true, subtree: true });
-  setInterval(() => applyStats(statsNode.textContent || ''), 250);
+  setInterval(() => { applyStats(statsNode.textContent || ''); watchScene(); }, 250);
 </script>
 <script>
   try {

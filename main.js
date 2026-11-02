@@ -1,4 +1,5 @@
 // src/shaders.ts
+var ACTOR_DROP_Y = 0.02;
 var EVAL_WGSL = (
   /* wgsl */
   `
@@ -89,7 +90,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let s = ev3(hdr[h + 5u], (kp >> 12u) & 63u);
   let o = ev1(hdr[h + 6u], (kp >> 18u) & 63u);
   let d = ev3(hdr[h + 7u], (kp >> 24u) & 63u);
-  world[i * 4u] = vec4f(p, 1.0);
+  world[i * 4u] = vec4f(p.x, p.y - ${ACTOR_DROP_Y}, p.z, 1.0);
   world[i * 4u + 1u] = q;
   world[i * 4u + 2u] = vec4f(s, o);
   world[i * 4u + 3u] = vec4f(d, 0.0);
@@ -134,7 +135,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     q = qmul(H[11], q);
     s = s + vec3f(H[12].x);
   }
-  world[i * 4u] = vec4f(p, 1.0);
+  world[i * 4u] = vec4f(p.x, p.y - ${ACTOR_DROP_Y}, p.z, 1.0);
   world[i * 4u + 1u] = q;
   world[i * 4u + 2u] = vec4f(s, o);
   world[i * 4u + 3u] = vec4f(d, 0.0);
@@ -373,18 +374,28 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut 
   return o;
 }
 
+struct FragOut {
+  @location(0) color: vec4f,
+  @location(1) depth: vec4f,
+};
+
 @fragment
-fn fs(v: VOut) -> @location(0) vec4f {
+fn fs(v: VOut) -> FragOut {
   let d = v.d;
   let sigma = 0.5 * (v.conic.x * d.x * d.x + v.conic.z * d.y * d.y) + v.conic.y * d.x * d.y;
   if (sigma < 0.0) { discard; }
   let alpha = min(0.999, v.col.w * exp(-sigma));
   if (alpha < 1.0 / 255.0) { discard; }
+  var o: FragOut;
+  let solid = alpha > 0.12 && v.z > 0.05;
+  o.depth = vec4f(select(1e3, v.z, solid), 0.0, 0.0, 0.0);
   if (real_occludes(v.pos.xy, v.z)) {
     if (O.dbg.x < 0.5) { discard; }
-    return vec4f(alpha, 0.0, 0.0, alpha);
+    o.color = vec4f(alpha, 0.0, 0.0, alpha);
+    return o;
   }
-  return vec4f(v.col.rgb * alpha, alpha);
+  o.color = vec4f(v.col.rgb * alpha, alpha);
+  return o;
 }
 `
 );
@@ -528,12 +539,7 @@ fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
   let shSize = vec2i(textureDimensions(shadow));
   let sp = min(uv, shSize - vec2i(1));
   let s = textureLoad(shadow, sp, 0);
-  var sa = clamp(max(max(s.r, s.g), max(s.b, s.a)), 0.0, 1.0);
-  // DEBUG: hard floor oval under the subject so a dead shadow pass is still visible.
-  let dims = vec2f(textureDimensions(color));
-  let q = (vec2f(uv) / dims) * 2.0 - 1.0;
-  let oval = 1.0 - clamp(length((q - vec2f(0.0, 0.55)) / vec2f(0.22, 0.08)), 0.0, 1.0);
-  sa = max(sa, oval * 0.55);
+  let sa = clamp(max(max(s.r, s.g), max(s.b, s.a)), 0.0, 1.0);
   let a = clamp(c.a, 0.0, 1.0);
   return vec4f(c.rgb, a + (1.0 - a) * sa);
 }
@@ -1079,6 +1085,48 @@ function nextPow2(n) {
   while (p < n) p *= 2;
   return p;
 }
+var CAM_OCCL_WGSL = (
+  /* wgsl */
+  `
+struct VIn {
+  @location(0) xy: vec2f,
+  @location(1) uv: vec2f,
+  @location(2) col: vec4f,
+  @location(3) z: f32,
+};
+struct VOut {
+  @builtin(position) pos: vec4f,
+  @location(0) z: f32,
+  @location(1) uv: vec2f,
+  @location(2) col: vec4f,
+};
+struct PaintU { size: vec2f, pad: vec2f };
+@group(0) @binding(0) var<uniform> U: PaintU;
+@group(0) @binding(1) var bodyZ: texture_2d<f32>;
+@group(0) @binding(2) var img: texture_2d<f32>;
+@group(0) @binding(3) var samp: sampler;
+
+@vertex
+fn vs(v: VIn) -> VOut {
+  var o: VOut;
+  o.pos = vec4f(v.xy.x / U.size.x * 2.0 - 1.0, 1.0 - v.xy.y / U.size.y * 2.0, 0.0, 1.0);
+  o.z = v.z;
+  o.uv = v.uv;
+  o.col = v.col;
+  return o;
+}
+
+@fragment
+fn fs(v: VOut) -> @location(0) vec4f {
+  let sz = textureLoad(bodyZ, vec2i(v.pos.xy), 0).r;
+  if (sz + 0.05 < v.z) { discard; }
+  let texel = textureSampleLevel(img, samp, v.uv, 0.0);
+  let a = v.col.a * texel.a;
+  if (a < 0.01) { discard; }
+  return vec4f(texel.rgb * v.col.rgb, a);
+}
+`
+);
 var Renderer = class {
   device;
   format;
@@ -1184,6 +1232,7 @@ var Renderer = class {
     this.sortLocal = device.createComputePipeline({ layout: "auto", compute: { module: sm, entryPoint: "local_sort" } });
     const rm = mod(RASTER_WGSL);
     const blend = { srcFactor: "one-minus-dst-alpha", dstFactor: "one", operation: "add" };
+    const minBlend = { srcFactor: "one", dstFactor: "one", operation: "min" };
     const V = GPUShaderStage.VERTEX, F = GPUShaderStage.FRAGMENT;
     const rasterBGL = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility: V, buffer: { type: "uniform" } },
@@ -1202,7 +1251,10 @@ var Renderer = class {
     this.rasterPipe = device.createRenderPipeline({
       layout: device.createPipelineLayout({ bindGroupLayouts: [rasterBGL, this.occLayout] }),
       vertex: { module: rm, entryPoint: "vs" },
-      fragment: { module: rm, entryPoint: "fs", targets: [{ format: "rgba16float", blend: { color: blend, alpha: blend } }] },
+      fragment: { module: rm, entryPoint: "fs", targets: [
+        { format: "rgba16float", blend: { color: blend, alpha: blend } },
+        { format: "rgba16float", blend: { color: minBlend, alpha: minBlend } }
+      ] },
       primitive: { topology: "triangle-strip" }
     });
     const smSh = mod(SHADOW_RASTER_WGSL);
@@ -1344,6 +1396,7 @@ var Renderer = class {
     let s = 0;
     for (const v of this.bytes.values()) s += v;
     if (this.target) s += this.targetSize[0] * this.targetSize[1] * 8;
+    if (this.bodyDepths) for (const t of this.bodyDepths.values()) s += t.width * t.height * 8;
     for (const t of this.xrTargets) s += t.width * t.height * 8;
     return s;
   }
@@ -1538,6 +1591,135 @@ var Renderer = class {
       label: "floor-shadow"
     });
   }
+  ensureBodyDepth(w, h) {
+    if (!this.bodyDepths) this.bodyDepths = /* @__PURE__ */ new Map();
+    const key = w + "x" + h;
+    let tex = this.bodyDepths.get(key);
+    if (!tex) {
+      tex = this.device.createTexture({
+        size: [Math.max(1, w), Math.max(1, h)],
+        format: "rgba16float",
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+        label: "body-depth-" + key
+      });
+      this.bodyDepths.set(key, tex);
+    }
+    this.bodyDepth = tex;
+    return tex;
+  }
+  captureBodyDepth(enc, src) {
+    const dev = this.device;
+    const sw = src.width, sh = src.height;
+    const cols = Math.max(1, Math.ceil(sw / 8));
+    const dh = Math.max(1, Math.ceil(sh / 8));
+    const bytesPerRow = Math.ceil(cols * 8 / 256) * 256;
+    if (!this.depthRead || this.depthRead.sw !== sw || this.depthRead.sh !== sh) {
+      if (this.depthRead?.busy.some(Boolean)) return;
+      this.depthRead?.tex.destroy();
+      this.depthRead?.bufs.forEach((b) => b.destroy());
+      if (!this.depthPipe) {
+        const sm = dev.createShaderModule({ code: `
+@group(0) @binding(0) var src: texture_2d<f32>;
+struct D { srcSize: vec2f, tile: vec2f };
+@group(0) @binding(1) var<uniform> U: D;
+@vertex fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
+  let p = vec2f(f32((vi << 1u) & 2u), f32(vi & 2u));
+  return vec4f(p * 2.0 - 1.0, 0.0, 1.0);
+}
+@fragment fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
+  let tile = max(U.tile, vec2f(1.0));
+  let origin = vec2i(vec2f(p.xy) * tile);
+  let sx = max(1, i32(tile.x));
+  let sy = max(1, i32(tile.y));
+  let step = max(1, min(sx, sy) / 4);
+  var m = 1e3;
+  let lim = vec2i(U.srcSize);
+  for (var y = 0; y < sy; y += step) {
+    for (var x = 0; x < sx; x += step) {
+      let s = origin + vec2i(x, y);
+      if (s.x >= 0 && s.y >= 0 && s.x < lim.x && s.y < lim.y) { m = min(m, textureLoad(src, s, 0).r); }
+    }
+  }
+  return vec4f(m, 0.0, 0.0, 1.0);
+}
+` });
+        this.depthPipe = dev.createRenderPipeline({
+          layout: "auto",
+          vertex: { module: sm, entryPoint: "vs" },
+          fragment: { module: sm, entryPoint: "fs", targets: [{ format: "rgba16float" }] },
+          primitive: { topology: "triangle-list" }
+        });
+        this.depthU = this.buf("depthU", 16, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+      }
+      const tex = dev.createTexture({
+        size: [cols, dh], format: "rgba16float",
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+        label: "body-depth-small"
+      });
+      const bufs = [0, 1].map(() => dev.createBuffer({
+        size: bytesPerRow * dh,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+      }));
+      this.depthRead = { tex, bufs, busy: [false, false], slot: 0, sw, sh, cols, dh, bytesPerRow };
+      this.depthBG = null;
+    }
+    const r = this.depthRead;
+    dev.queue.writeBuffer(this.depthU, 0, new Float32Array([sw, sh, sw / r.cols, sh / r.dh]));
+    if (!this.depthBG || this.depthBG.src !== src) {
+      this.depthBG = {
+        src,
+        bg: dev.createBindGroup({
+          layout: this.depthPipe.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: this.viewOf(src) },
+            { binding: 1, resource: { buffer: this.depthU } }
+          ]
+        })
+      };
+    }
+    const slot = r.slot;
+    if (r.busy[slot]) return;
+    const pass = enc.beginRenderPass({
+      colorAttachments: [{
+        view: r.tex.createView(),
+        loadOp: "clear",
+        storeOp: "store",
+        clearValue: { r: 1e3, g: 0, b: 0, a: 1 }
+      }]
+    });
+    pass.setPipeline(this.depthPipe);
+    pass.setBindGroup(0, this.depthBG.bg);
+    pass.draw(3);
+    pass.end();
+    r.slot = 1 - slot;
+    enc.copyTextureToBuffer({ texture: r.tex }, { buffer: r.bufs[slot], bytesPerRow: r.bytesPerRow }, [r.cols, r.dh]);
+    r.busy[slot] = true;
+    this.depthPendingMap = {
+      buf: r.bufs[slot], slot, r,
+      w: r.cols, h: r.dh, srcW: r.sw, srcH: r.sh, stride16: r.bytesPerRow / 2
+    };
+  }
+  flushDepthRead() {
+    const job = this.depthPendingMap;
+    if (!job) return;
+    this.depthPendingMap = null;
+    const { buf, slot, r, w, h, srcW, srcH, stride16 } = job;
+    buf.mapAsync(GPUMapMode.READ).then(() => {
+      const u16 = new Uint16Array(buf.getMappedRange().slice(0));
+      buf.unmap();
+      r.busy[slot] = false;
+      if (this.depthRead !== r) return;
+      const data = new Float32Array(w * h);
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) data[y * w + x] = halfToFloat(u16[y * stride16 + x * 4]);
+      }
+      this.splatDepth = { w, h, srcW, srcH, stride: w, data };
+    }).catch(() => {
+      r.busy[slot] = false;
+    });
+  }
+  paintCams() {
+  }
   /** encode one frame at global frame time t (fractional) into `out` (canvas texture) and submit.
    *  opts.diff: show |render − ref| (difference view) instead of the render. */
   frame(g, t, cam, out, opts = {}) {
@@ -1555,6 +1737,7 @@ var Renderer = class {
       null,
       this.reuseOrder(g) ? 2 : 0
     );
+    this.camMesh = null;
     let slot = -1;
     if (ts) {
       slot = ts.next;
@@ -1567,6 +1750,7 @@ var Renderer = class {
     const readVis = opts.readVisible && this.visibleBuf.mapState === "unmapped";
     if (readVis) enc.copyBufferToBuffer(this.indirect, 0, this.visibleBuf, 0, 16);
     dev.queue.submit([enc.finish()]);
+    this.flushDepthRead();
     if (ts && slot >= 0) {
       const rb = ts.read[slot], hasBlit = !!out;
       rb.mapAsync(GPUMapMode.READ).then(() => {
@@ -1721,10 +1905,16 @@ var Renderer = class {
       pass.end();
     }
     const targetView = this.viewOf(target);
+    const bodyDepth = this.ensureBodyDepth(target.width, target.height);
     const rp = enc.beginRenderPass({
       colorAttachments: [{
         view: targetView,
         clearValue: { r: 0, g: 0, b: 0, a: 0 },
+        loadOp: "clear",
+        storeOp: "store"
+      }, {
+        view: this.viewOf(bodyDepth),
+        clearValue: { r: 1000, g: 0, b: 0, a: 0 },
         loadOp: "clear",
         storeOp: "store"
       }],
@@ -1735,6 +1925,7 @@ var Renderer = class {
     rp.setBindGroup(1, occ);
     rp.drawIndirect(this.indirect, 0);
     rp.end();
+    if (dest?.kind === "canvas") this.captureBodyDepth(enc, bodyDepth);
     if (this.shadow) {
       this.ensureShadowTarget(target.width, target.height);
       const shTex = this.shadowTarget;
@@ -1798,6 +1989,8 @@ var Renderer = class {
       }
       bp.draw(3);
       bp.end();
+      if (this.camMesh?.length && bodyDepth.width === dest.texture.width && bodyDepth.height === dest.texture.height)
+        this.paintCams(enc, dest.texture);
     } else if (dest?.kind === "xr") {
       const eye = dest.eye;
       const { pipe, uni } = this.xrBlitPipeline(eye.format);
@@ -3803,7 +3996,25 @@ function project(view, p) {
   };
 }
 var FRUSTUM_Z = 0.22;
-var THUMB_W = 72;
+var REAL_CAM = "c24";
+var REAL_LABEL = "Real view";
+var SYNTH_LABEL = "synthetic";
+var REAL_FRUSTUM_Z = 0.7;
+var SYNTH_FRAMES = 64;
+function stripFrame(imgW, frame, frames = SYNTH_FRAMES) {
+  const n = Math.max(1, frames);
+  const w = imgW / n;
+  const i = Math.min(n - 1, Math.max(0, Math.floor(frame)));
+  return { x: i * w, w };
+}
+function halfToFloat(h) {
+  const s = (h & 32768) >> 15;
+  const e = (h & 31744) >> 10;
+  const f = h & 1023;
+  if (e === 0) return (s ? -1 : 1) * 2 ** -14 * (f / 1024);
+  if (e === 31) return f ? NaN : (s ? -1 : 1) * Infinity;
+  return (s ? -1 : 1) * 2 ** (e - 15) * (1 + f / 1024);
+}
 function behindActor(eye, point, actor) {
   const dx = point[0] - eye[0], dy = point[1] - eye[1], dz = point[2] - eye[2];
   const ox = eye[0] - actor.center[0], oz = eye[2] - actor.center[2];
@@ -3822,11 +4033,56 @@ function behindActor(eye, point, actor) {
   const y = eye[1] + dy * enter;
   return y >= y0 && y <= y1;
 }
+function drawImageQuad(ctx, img, sw, sh, p, behind) {
+  const paint = (d0, d1, d2, s0x, s0y, s1x, s1y, s2x, s2y) => {
+    const denom = s0x * (s1y - s2y) + s1x * (s2y - s0y) + s2x * (s0y - s1y);
+    if (!(Math.abs(denom) > 1e-8)) return;
+    const m11 = (d0.x * (s1y - s2y) + d1.x * (s2y - s0y) + d2.x * (s0y - s1y)) / denom;
+    const m12 = (d0.y * (s1y - s2y) + d1.y * (s2y - s0y) + d2.y * (s0y - s1y)) / denom;
+    const m21 = (d0.x * (s2x - s1x) + d1.x * (s0x - s2x) + d2.x * (s1x - s0x)) / denom;
+    const m22 = (d0.y * (s2x - s1x) + d1.y * (s0x - s2x) + d2.y * (s1x - s0x)) / denom;
+    const dx = (d0.x * (s1x * s2y - s2x * s1y) + d1.x * (s2x * s0y - s0x * s2y) + d2.x * (s0x * s1y - s1x * s0y)) / denom;
+    const dy = (d0.y * (s1x * s2y - s2x * s1y) + d1.y * (s2x * s0y - s0x * s2y) + d2.y * (s0x * s1y - s1x * s0y)) / denom;
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(d0.x, d0.y);
+    ctx.lineTo(d1.x, d1.y);
+    ctx.lineTo(d2.x, d2.y);
+    ctx.closePath();
+    ctx.clip();
+    ctx.setTransform(m11, m12, m21, m22, dx, dy);
+    ctx.drawImage(img, 0, 0, sw, sh);
+    ctx.restore();
+  };
+  const lerp = (a, b, t) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: (a.z ?? 0) + ((b.z ?? 0) - (a.z ?? 0)) * t });
+  const at = (u, v) => lerp(lerp(p[0], p[1], u), lerp(p[3], p[2], u), v);
+  const N = behind ? 8 : 1;
+  for (let j = 0; j < N; j++) {
+    for (let i = 0; i < N; i++) {
+      const u0 = i / N, u1 = (i + 1) / N, v0 = j / N, v1 = (j + 1) / N;
+      if (behind) {
+        const m = at((u0 + u1) / 2, (v0 + v1) / 2);
+        if (behind(m.x, m.y, m.z)) continue;
+      }
+      const q00 = at(u0, v0), q10 = at(u1, v0), q11 = at(u1, v1), q01 = at(u0, v1);
+      const sx0 = u0 * sw, sx1 = u1 * sw, sy0 = v0 * sh, sy1 = v1 * sh;
+      paint(q00, q10, q01, sx0, sy0, sx1, sy0, sx0, sy1);
+      paint(q10, q11, q01, sx1, sy0, sx1, sy1, sx0, sy1);
+    }
+  }
+}
 var CamVizOverlay = class {
   canvas;
   ctx;
-  thumbs = /* @__PURE__ */ new Map();
+  strips = /* @__PURE__ */ new Map();
+  labels = /* @__PURE__ */ new Map();
+  mesh = [];
   bakeKey = "";
+  stripToken = 0;
+  stripMiss = false;
+  /** Live iPhone clip for c24. The rig around it plays the synthetic training views. */
+  realVideo = null;
+  realActive = false;
   enabled = false;
   constructor(host) {
     this.canvas = document.createElement("canvas");
@@ -3842,27 +4098,28 @@ var CamVizOverlay = class {
     host.appendChild(this.canvas);
     this.ctx = this.canvas.getContext("2d");
   }
-  clearThumbs() {
-    for (const b of this.thumbs.values()) b.close();
-    this.thumbs.clear();
-    this.bakeKey = "";
-  }
-  setSceneKey(key) {
+  /** Load one frame-strip per rig camera. c24 plays the shared real clip on every take. */
+  bind(key, take, cams) {
     if (key === this.bakeKey) return;
-    this.clearThumbs();
+    this.strips.clear();
     this.bakeKey = key;
-  }
-  hasThumb(name) {
-    return this.thumbs.has(name);
-  }
-  async putThumb(name, source) {
-    const prev = this.thumbs.get(name);
-    prev?.close();
-    this.thumbs.set(name, await createImageBitmap(source));
-  }
-  thumbSize(cam) {
-    const w = THUMB_W;
-    return { w, h: Math.max(48, Math.round(w * cam.h / cam.w)) };
+    this.stripMiss = false;
+    const token = ++this.stripToken;
+    cams.forEach((cam, i) => {
+      if (cam.name === REAL_CAM) return;
+      const idx = cam.idx ?? i;
+      const img = new Image();
+      img.decoding = "async";
+      img.onload = () => {
+        if (this.stripToken === token) this.strips.set(cam.name, img);
+      };
+      img.onerror = () => {
+        if (this.stripToken !== token || this.stripMiss) return;
+        this.stripMiss = true;
+        console.warn("synthetic training views missing for", take);
+      };
+      img.src = new URL(`synth/${take}/c${String(idx).padStart(2, "0")}.jpg`, import.meta.url).href;
+    });
   }
   resize(cssW, cssH, pixelW, pixelH) {
     if (this.canvas.width === pixelW && this.canvas.height === pixelH) return;
@@ -3871,80 +4128,212 @@ var CamVizOverlay = class {
     this.canvas.style.width = cssW + "px";
     this.canvas.style.height = cssH + "px";
   }
-  draw(view, cams, actor) {
+  draw(view, cams, actor, frame = 0) {
     const ctx = this.ctx;
     const W = this.canvas.width, H = this.canvas.height;
     ctx.clearRect(0, 0, W, H);
     if (!this.enabled || !cams.length) return;
     const sx = W / view.width, sy = H / view.height;
     const eye = [view.campos[0], view.campos[1], view.campos[2]];
-    for (const cam of cams) {
-      const origin = camposOf(cam.R, cam.t);
-      if (actor && behindActor(eye, origin, actor)) continue;
-      const z = FRUSTUM_Z;
-      const hx = 0.5 * cam.w / cam.fx * z;
-      const hy = 0.5 * cam.h / cam.fy * z;
-      const corners = [
-        camToWorld(cam.R, cam.t, [-hx, -hy, z]),
-        camToWorld(cam.R, cam.t, [hx, -hy, z]),
-        camToWorld(cam.R, cam.t, [hx, hy, z]),
-        camToWorld(cam.R, cam.t, [-hx, hy, z])
-      ];
-      const po = project(view, origin);
-      const pc = corners.map((p) => project(view, p));
-      if (!po || pc.some((p) => !p)) continue;
-      const o = { x: po.x * sx, y: po.y * sy };
-      const c = pc.map((p) => ({ x: p.x * sx, y: p.y * sy }));
-      ctx.strokeStyle = "rgba(58, 74, 14, 0.95)";
+    const rest = this.realActive ? cams.filter((c) => c.name !== REAL_CAM) : cams;
+    const real = this.realActive ? cams.filter((c) => c.name === REAL_CAM) : [];
+    for (const cam of rest) this.drawCam(ctx, view, cam, actor, eye, sx, sy, W, false, frame);
+    for (const cam of real) this.drawCam(ctx, view, cam, actor, eye, sx, sy, W, true, frame);
+  }
+  drawCam(ctx, view, cam, actor, eye, sx, sy, W, real, frame) {
+    const origin = camposOf(cam.R, cam.t);
+    const z = real ? REAL_FRUSTUM_Z : FRUSTUM_Z;
+    const hx = 0.5 * cam.w / cam.fx * z;
+    const hy = 0.5 * cam.h / cam.fy * z;
+    const corners = [
+      camToWorld(cam.R, cam.t, [-hx, -hy, z]),
+      camToWorld(cam.R, cam.t, [hx, -hy, z]),
+      camToWorld(cam.R, cam.t, [hx, hy, z]),
+      camToWorld(cam.R, cam.t, [-hx, hy, z])
+    ];
+    const po = project(view, origin);
+    const pc = corners.map((p) => project(view, p));
+    if (!po || pc.some((p) => !p)) return;
+    const o = { x: po.x * sx, y: po.y * sy, z: po.z };
+    const c = pc.map((p) => ({ x: p.x * sx, y: p.y * sy, z: p.z }));
+    const depth = this.splatDepth;
+    const behind = (x, y, zz, bias = 0.06) => {
+      if (!depth) return false;
+      const ix = Math.min(depth.w - 1, Math.max(0, (x / depth.srcW * depth.w) | 0));
+      const iy = Math.min(depth.h - 1, Math.max(0, (y / depth.srcH * depth.h) | 0));
+      const sz = depth.data[iy * depth.stride + ix];
+      return sz < 800 && zz > sz + bias;
+    };
+    let reveal = 1;
+    if (real) {
+      const shown = this.realScale ?? 1;
+      const inside = !depth || (o.x >= 0 && o.y >= 0 && o.x < depth.srcW && o.y < depth.srcH);
+      const hidden = inside && behind(o.x, o.y, o.z, shown < 0.5 ? 0.02 : 0.12);
+      const now = performance.now();
+      const dt = Math.min(0.05, this.realScaleAt ? (now - this.realScaleAt) / 1000 : 0);
+      this.realScaleAt = now;
+      const k = dt ? 1 - Math.exp(-dt / 0.12) : 1;
+      reveal = shown + ((hidden ? 0 : 1) - shown) * k;
+      this.realScale = reveal;
+      if (reveal < 0.02) return;
+    }
+    if (real) {
+      const H = this.canvas.height;
+      const labelH = Math.max(22, Math.round(W * 0.022)) + 24;
+      const pad = 20;
+      const minXBound = pad, maxXBound = W - pad;
+      const minYBound = pad + labelH, maxYBound = H * 0.68;
+      const availW = Math.max(80, maxXBound - minXBound);
+      const availH = Math.max(80, maxYBound - minYBound);
+      let minX2 = Math.min(c[0].x, c[1].x, c[2].x, c[3].x);
+      let maxX2 = Math.max(c[0].x, c[1].x, c[2].x, c[3].x);
+      let minY2 = Math.min(c[0].y, c[1].y, c[2].y, c[3].y);
+      let maxY2 = Math.max(c[0].y, c[1].y, c[2].y, c[3].y);
+      const bw0 = Math.max(maxX2 - minX2, 1);
+      const bh0 = Math.max(maxY2 - minY2, 1);
+      const target = Math.min(Math.max(280, H * 0.34), availW, availH);
+      const s = Math.min(target / Math.max(bw0, bh0), availW / bw0, availH / bh0) * reveal;
+      const cx = (minX2 + maxX2) / 2, cy = (minY2 + maxY2) / 2;
+      for (const p of c) {
+        p.x = cx + (p.x - cx) * s;
+        p.y = cy + (p.y - cy) * s;
+      }
+      o.x = cx + (o.x - cx) * s;
+      o.y = cy + (o.y - cy) * s;
+      minX2 = Math.min(c[0].x, c[1].x, c[2].x, c[3].x);
+      maxX2 = Math.max(c[0].x, c[1].x, c[2].x, c[3].x);
+      minY2 = Math.min(c[0].y, c[1].y, c[2].y, c[3].y);
+      maxY2 = Math.max(c[0].y, c[1].y, c[2].y, c[3].y);
+      let dx = 0, dy = 0;
+      if (minX2 < minXBound) dx = minXBound - minX2;
+      if (maxX2 + dx > maxXBound) dx += maxXBound - (maxX2 + dx);
+      if (minY2 < minYBound) dy = minYBound - minY2;
+      if (maxY2 + dy > maxYBound) dy += maxYBound - (maxY2 + dy);
+      if (dx || dy) {
+        for (const p of c) {
+          p.x += dx;
+          p.y += dy;
+        }
+        o.x += dx;
+        o.y += dy;
+      }
+    }
+    const strokeFrustum = (width, style, occlude) => {
+      ctx.strokeStyle = style;
+      ctx.lineWidth = width;
+      const seg = (a, b) => {
+        const N = occlude ? 14 : 1;
+        ctx.beginPath();
+        let on = false;
+        for (let i = 0; i <= N; i++) {
+          const t = i / N;
+          const x = a.x + (b.x - a.x) * t;
+          const y = a.y + (b.y - a.y) * t;
+          const zz = a.z + (b.z - a.z) * t;
+          if (occlude && behind(x, y, zz)) { on = false; continue; }
+          if (!on) { ctx.moveTo(x, y); on = true; }
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      };
+      seg(c[0], c[1]); seg(c[1], c[2]); seg(c[2], c[3]); seg(c[3], c[0]);
+      for (const q of c) seg(o, q);
+    };
+    const fillQuad = (occlude) => {
+      const N = occlude ? 8 : 1;
+      const lerp = (a, b, t) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: a.z + (b.z - a.z) * t });
+      const at = (u, v) => lerp(lerp(c[0], c[1], u), lerp(c[3], c[2], u), v);
+      for (let j = 0; j < N; j++) {
+        for (let i = 0; i < N; i++) {
+          const u0 = i / N, u1 = (i + 1) / N, v0 = j / N, v1 = (j + 1) / N;
+          const m = at((u0 + u1) / 2, (v0 + v1) / 2);
+          if (occlude && behind(m.x, m.y, m.z)) continue;
+          const q00 = at(u0, v0), q10 = at(u1, v0), q11 = at(u1, v1), q01 = at(u0, v1);
+          ctx.beginPath();
+          ctx.moveTo(q00.x, q00.y);
+          ctx.lineTo(q10.x, q10.y);
+          ctx.lineTo(q11.x, q11.y);
+          ctx.lineTo(q01.x, q01.y);
+          ctx.closePath();
+          ctx.fill();
+        }
+      }
+    };
+    if (real) {
+      ctx.fillStyle = "rgba(200, 241, 53, 0.16)";
+      fillQuad(false);
+      strokeFrustum(Math.max(10, W * 7e-3), "rgba(7, 8, 9, 0.92)", false);
+      strokeFrustum(Math.max(5, W * 36e-4), "#c8f135", false);
+    } else {
       ctx.fillStyle = "rgba(58, 74, 14, 0.2)";
-      ctx.lineWidth = Math.max(1, W * 12e-4);
+      fillQuad(true);
+      strokeFrustum(Math.max(1, W * 12e-4), "rgba(58, 74, 14, 0.95)", true);
+    }
+    const strip = this.strips.get(cam.name);
+    const live = real && this.realVideo && this.realVideo.readyState >= 2 ? this.realVideo : null;
+    const mid = {
+      x: (c[0].x + c[1].x + c[2].x + c[3].x) / 4,
+      y: (c[0].y + c[1].y + c[2].y + c[3].y) / 4
+    };
+    const midz = (c[0].z + c[1].z + c[2].z + c[3].z) / 4;
+    const bw = Math.hypot(c[1].x - c[0].x, c[1].y - c[0].y);
+    const bh = Math.hypot(c[3].x - c[0].x, c[3].y - c[0].y);
+    const minX = Math.min(c[0].x, c[1].x, c[2].x, c[3].x);
+    const maxX = Math.max(c[0].x, c[1].x, c[2].x, c[3].x);
+    const minY = Math.min(c[0].y, c[1].y, c[2].y, c[3].y);
+    const maxY = Math.max(c[0].y, c[1].y, c[2].y, c[3].y);
+    if (live && live.videoWidth > 0 && bw > 4 && bh > 4) {
+      drawImageQuad(ctx, live, live.videoWidth, live.videoHeight, c);
+      strokeFrustum(Math.max(10, W * 7e-3), "rgba(7, 8, 9, 0.92)", false);
+      strokeFrustum(Math.max(5, W * 36e-4), "#c8f135", false);
+    } else if (!real && strip && strip.naturalWidth > 0 && bw > 4 && bh > 4 && !behind(mid.x, mid.y, midz)) {
+      ctx.save();
       ctx.beginPath();
       ctx.moveTo(c[0].x, c[0].y);
       for (let i = 1; i < 4; i++) ctx.lineTo(c[i].x, c[i].y);
       ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-      ctx.beginPath();
-      for (const q of c) {
-        ctx.moveTo(o.x, o.y);
-        ctx.lineTo(q.x, q.y);
-      }
-      ctx.stroke();
-      const thumb = this.thumbs.get(cam.name);
-      const mid = {
-        x: (c[0].x + c[1].x + c[2].x + c[3].x) / 4,
-        y: (c[0].y + c[1].y + c[2].y + c[3].y) / 4
-      };
-      const bw = Math.hypot(c[1].x - c[0].x, c[1].y - c[0].y);
-      const bh = Math.hypot(c[3].x - c[0].x, c[3].y - c[0].y);
-      if (thumb && bw > 4 && bh > 4) {
-        ctx.save();
-        ctx.beginPath();
-        ctx.moveTo(c[0].x, c[0].y);
-        for (let i = 1; i < 4; i++) ctx.lineTo(c[i].x, c[i].y);
-        ctx.closePath();
-        ctx.clip();
-        const minX = Math.min(c[0].x, c[1].x, c[2].x, c[3].x);
-        const maxX = Math.max(c[0].x, c[1].x, c[2].x, c[3].x);
-        const minY = Math.min(c[0].y, c[1].y, c[2].y, c[3].y);
-        const maxY = Math.max(c[0].y, c[1].y, c[2].y, c[3].y);
-        ctx.drawImage(thumb, minX, minY, maxX - minX, maxY - minY);
-        ctx.restore();
-        ctx.strokeStyle = "rgba(232, 228, 220, 0.7)";
-        ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
-      } else {
-        const tw = Math.max(28, bw * 0.9);
-        const th = tw * (cam.h / cam.w);
-        ctx.fillStyle = "rgba(12, 14, 16, 0.75)";
-        ctx.fillRect(mid.x - tw / 2, mid.y - th / 2, tw, th);
-        ctx.strokeStyle = "rgba(58, 74, 14, 0.9)";
-        ctx.strokeRect(mid.x - tw / 2, mid.y - th / 2, tw, th);
-      }
-      ctx.fillStyle = "rgba(232, 228, 220, 0.95)";
-      ctx.font = `${Math.max(10, Math.round(W * 0.011))}px "IBM Plex Mono", ui-monospace, monospace`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "top";
-      ctx.fillText(cam.name, mid.x, Math.max(c[0].y, c[1].y, c[2].y, c[3].y) + 4);
+      ctx.clip();
+      const src = stripFrame(strip.naturalWidth, frame);
+      ctx.drawImage(strip, src.x, 0, src.w, strip.naturalHeight, minX, minY, maxX - minX, maxY - minY);
+      ctx.restore();
+      ctx.lineWidth = Math.max(1, W * 1e-3);
+      ctx.strokeStyle = "rgba(232, 228, 220, 0.7)";
+      ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
+    } else if (!real && !behind(mid.x, mid.y, midz)) {
+      const tw = Math.max(28, bw * 0.9);
+      const th = tw * (cam.h / cam.w);
+      ctx.fillStyle = "rgba(12, 14, 16, 0.75)";
+      ctx.fillRect(mid.x - tw / 2, mid.y - th / 2, tw, th);
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = "rgba(58, 74, 14, 0.9)";
+      ctx.strokeRect(mid.x - tw / 2, mid.y - th / 2, tw, th);
+    }
+    const label = real ? REAL_LABEL : SYNTH_LABEL;
+    const size = real ? Math.max(22, Math.round(W * 0.022)) * reveal : Math.max(9, Math.round(W * 9e-3));
+    ctx.font = `${real ? 700 : 500} ${size}px "IBM Plex Mono", ui-monospace, monospace`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    const top = Math.min(c[0].y, c[1].y, c[2].y, c[3].y);
+    const bottom = Math.max(c[0].y, c[1].y, c[2].y, c[3].y);
+    const ly = real ? Math.max(8, top - size - 16) : bottom + 4;
+    if (!real && behind(mid.x, ly, midz)) return;
+    if (real) {
+      const tw = ctx.measureText(label).width;
+      const padX = 12, padY = 6;
+      const half = tw / 2 + padX;
+      const lx = Math.min(W - half - 8, Math.max(half + 8, mid.x));
+      ctx.fillStyle = "#c8f135";
+      ctx.fillRect(lx - half, ly - 2, tw + padX * 2, size + padY * 2);
+      ctx.fillStyle = "#12140e";
+      ctx.fillText(label, lx, ly);
+      return;
+    } else {
+      ctx.save();
+      ctx.shadowColor = "rgba(8, 10, 12, 0.8)";
+      ctx.shadowBlur = 2;
+      ctx.fillStyle = "rgba(232, 228, 220, 0.72)";
+      ctx.fillText(label, mid.x, ly);
+      ctx.restore();
     }
   }
 };
@@ -3995,11 +4384,7 @@ async function sceneList() {
       codecKnown.set(n, false);
     }
   }));
-  return names.filter((n) => typeof n === "string" && codecKnown.get(n) === true).sort((a, b) => {
-    const af = sceneLabel(a) === "female" ? 1 : 0;
-    const bf = sceneLabel(b) === "female" ? 1 : 0;
-    return af - bf || sceneLabel(a).localeCompare(sceneLabel(b));
-  });
+  return names.filter((n) => typeof n === "string" && codecKnown.get(n) === true).sort((a, b) => sceneLabel(a).localeCompare(sceneLabel(b)));
 }
 var onScenePicked = () => {
 };
@@ -4135,56 +4520,15 @@ async function main() {
   };
   setCamViz(!!camVizBox?.checked);
   camVizBox?.addEventListener("change", () => setCamViz(camVizBox.checked));
-  let thumbCanvas = null;
-  let thumbGpu = null;
-  let thumbBaking = false;
-  let thumbCursor = 0;
-  const bakeThumb = async (g, t) => {
-    if (!camViz.enabled || thumbBaking || !scene.testcams.length) return;
-    const cams = scene.testcams;
-    let idx = -1;
-    for (let k = 0; k < cams.length; k++) {
-      const i = (thumbCursor + k) % cams.length;
-      if (!camViz.hasThumb(cams[i].name)) {
-        idx = i;
-        break;
-      }
-    }
-    if (idx < 0) return;
-    thumbCursor = idx + 1;
-    const tc = cams[idx];
-    const { w, h } = camViz.thumbSize(tc);
-    thumbBaking = true;
-    try {
-      if (!thumbCanvas || !thumbGpu) {
-        thumbCanvas = document.createElement("canvas");
-        thumbGpu = thumbCanvas.getContext("webgpu");
-        if (!thumbGpu) return;
-      }
-      if (thumbCanvas.width !== w || thumbCanvas.height !== h) {
-        thumbCanvas.width = w;
-        thumbCanvas.height = h;
-        thumbGpu.configure({ device, format, alphaMode: "opaque" });
-      }
-      const cam = camFromRt(
-        tc.R,
-        tc.t,
-        tc.fx * (w / tc.w),
-        tc.fy * (h / tc.h),
-        tc.cx * (w / tc.w),
-        tc.cy * (h / tc.h),
-        w,
-        h
-      );
-      renderer.frame(g, t, cam, thumbGpu.getCurrentTexture(), {});
-      await device.queue.onSubmittedWorkDone();
-      await camViz.putThumb(tc.name, thumbCanvas);
-    } catch (e) {
-      console.warn("cam viz thumb bake failed", e);
-    } finally {
-      thumbBaking = false;
-    }
-  };
+  const REAL_SRC_FPS = 24400 / 841;
+  const realVideo = document.createElement("video");
+  realVideo.muted = true;
+  realVideo.playsInline = true;
+  realVideo.preload = "auto";
+  realVideo.src = new URL("./real/angry_j.mp4", import.meta.url).href;
+  realVideo.hidden = true;
+  document.body.appendChild(realVideo);
+  camViz.realVideo = realVideo;
   const shadowOn = (Q.get("shadow") ?? "1") !== "0";
   renderer.shadow = shadowOn;
   renderer.shadowStride = Math.max(1, Math.round(qnum("shadowstride", 2, 1)));
@@ -4203,8 +4547,6 @@ async function main() {
     const [r, g, b] = [0, 2, 4].map((i) => parseInt(m[1].slice(i, i + 2), 16) / 255);
     renderer.setBackground(r, g, b);
     bgInput.value = "#" + m[1].toLowerCase();
-    const bgHex = document.getElementById("bg-hex");
-    if (bgHex) bgHex.textContent = bgInput.value;
   };
   setBg(Q.get("bg") ?? setting("bg") ?? (shadowOn ? "#d9d4cc" : "#000000"));
   bgInput.addEventListener("input", () => {
@@ -4448,6 +4790,9 @@ async function main() {
     gradeInputs.set(s.field, { range, num });
   }
   const showHoldUi = () => {
+    gradeBox.hidden = !holding;
+    gradeBox.open = holding;
+    holdBtn.setAttribute("aria-expanded", holding ? "true" : "false");
     if (desk) {
       desk.take = sceneLabel(sceneName);
       desk.editing = holding;
@@ -4569,17 +4914,11 @@ async function main() {
     if (!name) return;
     await loadScene(name, holding);
   };
-  let carouselSteps = 0;
   const advance = async () => {
     if (switching || holding) return;
     switching = true;
     try {
       await stepVariant(1);
-      carouselSteps++;
-      if (carousel.length > 0 && carouselSteps >= carousel.length) {
-        carouselSteps = 0;
-        setCamViz(!camViz.enabled);
-      }
     } finally {
       switching = false;
     }
@@ -4587,11 +4926,9 @@ async function main() {
   onScenePicked = (name) => {
     void loadScene(name, true);
   };
-  holdBtn.textContent = "Color Settings";
   holdBtn.addEventListener("click", () => {
-    const open = gradeBox.hidden;
-    gradeBox.hidden = !open;
-    holdBtn.setAttribute("aria-expanded", String(open));
+    holding = !holding;
+    showHoldUi();
   });
   showHoldUi();
   const bumpPlay = (dt) => {
@@ -4607,13 +4944,43 @@ async function main() {
   const ORBIT_ZOOM = 1.6;
   let az = Number(Q.get("az") ?? 0) * Math.PI / 180, elev = scene.orbit.elev_deg * Math.PI / 180;
   let distScale = Number(Q.get("zoom") ?? (document.documentElement.dataset.orbit === "1" ? ORBIT_ZOOM : 1));
-  const elev0 = elev;
-  const ORBIT_PERIOD = 16, ORBIT_ELEV = 8 * Math.PI / 180;
-  let orbitT = 0;
+  const ORBIT_PERIOD = 16, ORBIT_ELEV = 8 * Math.PI / 180, ORBIT_IDLE_MS = 15e3;
+  let elevCenter = elev, nodPhase = 0;
   let orbiting = document.documentElement.dataset.orbit === "1" && !Q.has("az") && !Q.has("elev") && !Q.has("zoom") && !Q.has("testcam");
-  const stopOrbit = () => {
-    orbiting = false;
+  let resumeAfterIdle = false;
+  let lastInput = performance.now();
+  let drag = null;
+  const orbitBox = document.getElementById("orbit");
+  const noteInput = () => {
+    lastInput = performance.now();
   };
+  const stopOrbit = (resume = false) => {
+    orbiting = false;
+    resumeAfterIdle = resume;
+    if (orbitBox) orbitBox.checked = false;
+    if (resume) noteInput();
+  };
+  const startOrbit = () => {
+    elevCenter = elev - ORBIT_ELEV * Math.sin(nodPhase / 2);
+    orbiting = true;
+    resumeAfterIdle = false;
+    if (orbitBox) orbitBox.checked = true;
+  };
+  if (orbitBox) orbitBox.checked = orbiting;
+  orbitBox?.addEventListener("change", () => {
+    if (orbitBox.checked) startOrbit();
+    else {
+      orbiting = false;
+      resumeAfterIdle = false;
+    }
+  });
+  window.addEventListener("pointerdown", noteInput);
+  window.addEventListener("pointerup", noteInput);
+  window.addEventListener("pointermove", (e) => {
+    if (e.buttons) noteInput();
+  });
+  window.addEventListener("wheel", noteInput, { passive: true });
+  window.addEventListener("keydown", noteInput);
   const fpsWin = [];
   const testIdx = Q.has("testcam") ? Number(Q.get("testcam")) : -1;
   const currentCam = () => {
@@ -4644,11 +5011,12 @@ async function main() {
     if (!rafOn) return;
     const dt = lastNow ? (now - lastNow) / 1e3 : 0;
     lastNow = now;
+    if (!orbiting && resumeAfterIdle && testIdx < 0 && !drag && now - lastInput >= ORBIT_IDLE_MS) startOrbit();
     if (orbiting) {
-      orbitT += Math.min(dt, 0.1);
-      const ph = 2 * Math.PI * orbitT / ORBIT_PERIOD;
-      az = ph;
-      elev = elev0 + ORBIT_ELEV * Math.sin(ph / 2);
+      const dPhase = 2 * Math.PI * Math.min(dt, 0.1) / ORBIT_PERIOD;
+      az += dPhase;
+      nodPhase += dPhase;
+      elev = elevCenter + ORBIT_ELEV * Math.sin(nodPhase / 2);
     }
     let { seq, t } = locate(playFrames);
     housekeeping(seq);
@@ -4681,11 +5049,26 @@ async function main() {
     };
     if (frames % 15 === 0) hud();
     camViz.resize(canvas.clientWidth, canvas.clientHeight, canvas.width, canvas.height);
-    camViz.setSceneKey(sceneName);
+    const take = sceneLabel(sceneName);
+    camViz.realActive = true;
+    camViz.bind(sceneName, take, scene.testcams);
+    if (!camViz.realActive || !camViz.enabled) {
+      if (!realVideo.paused) realVideo.pause();
+    } else if (realVideo.readyState >= 1) {
+      const dur = realVideo.duration;
+      const target = Math.max(0, Math.min(Number.isFinite(dur) ? Math.max(0, dur - 0.04) : 1e9, t / REAL_SRC_FPS));
+      if (!Number.isFinite(realVideo.currentTime) || Math.abs(realVideo.currentTime - target) > 0.08 || !playing)
+        realVideo.currentTime = target;
+      if (playing) {
+        realVideo.playbackRate = scene.fps / REAL_SRC_FPS;
+        if (realVideo.paused) void realVideo.play().catch(() => {
+        });
+      } else if (!realVideo.paused) realVideo.pause();
+    }
     if (camViz.enabled) {
+      camViz.splatDepth = renderer.splatDepth ?? null;
       const oc = scene.orbit.center;
-      camViz.draw(currentCam(), scene.testcams, { center: [oc[0], oc[1], oc[2]], radius: 0.45, halfHeight: 0.95 });
-      if (g) void bakeThumb(g, t);
+      camViz.draw(currentCam(), scene.testcams, { center: [oc[0], oc[1], oc[2]], radius: 0.45, halfHeight: 0.95 }, t);
     } else {
       camViz.draw(currentCam(), []);
     }
@@ -4694,9 +5077,7 @@ async function main() {
     requestAnimationFrame(tick);
   };
   requestAnimationFrame(tick);
-  let drag = null;
   canvas.addEventListener("pointerdown", (e) => {
-    stopOrbit();
     drag = { x: e.clientX, y: e.clientY };
     canvas.setPointerCapture(e.pointerId);
   });
@@ -4705,12 +5086,12 @@ async function main() {
   });
   canvas.addEventListener("pointermove", (e) => {
     if (!drag) return;
+    stopOrbit(true);
     az -= (e.clientX - drag.x) * 0.01;
     elev = Math.max(-1.4, Math.min(1.4, elev + (e.clientY - drag.y) * 0.01));
     drag = { x: e.clientX, y: e.clientY };
   });
   canvas.addEventListener("wheel", (e) => {
-    stopOrbit();
     distScale *= Math.exp(e.deltaY * 1e-3);
     e.preventDefault();
   }, { passive: false });
@@ -4899,12 +5280,15 @@ async function main() {
             if (desk) desk.placed = false;
             showGrade();
             xrButton.textContent = "MR";
+            camViz.canvas.hidden = false;
             requestAnimationFrame(tick);
           });
           placed = null;
           xrFrames = 0;
           xrDrawError = false;
           stopOrbit();
+          camViz.draw(currentCam(), []);
+          camViz.canvas.hidden = true;
           rafOn = false;
           lastNow = 0;
           xr = stage;
