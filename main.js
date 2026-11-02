@@ -3690,6 +3690,159 @@ function requestWithTimeout(mode, init, ms) {
   });
 }
 
+// src/camViz.ts
+var camToWorld = (R, t, p) => {
+  const q = [p[0] - t[0], p[1] - t[1], p[2] - t[2]];
+  return [
+    R[0][0] * q[0] + R[1][0] * q[1] + R[2][0] * q[2],
+    R[0][1] * q[0] + R[1][1] * q[1] + R[2][1] * q[2],
+    R[0][2] * q[0] + R[1][2] * q[1] + R[2][2] * q[2]
+  ];
+};
+var camposOf = (R, t) => [
+  -(R[0][0] * t[0] + R[1][0] * t[1] + R[2][0] * t[2]),
+  -(R[0][1] * t[0] + R[1][1] * t[1] + R[2][1] * t[2]),
+  -(R[0][2] * t[0] + R[1][2] * t[1] + R[2][2] * t[2])
+];
+function project(view, p) {
+  const v = view.view;
+  const x = v[0] * p[0] + v[4] * p[1] + v[8] * p[2] + v[12];
+  const y = v[1] * p[0] + v[5] * p[1] + v[9] * p[2] + v[13];
+  const z = v[2] * p[0] + v[6] * p[1] + v[10] * p[2] + v[14];
+  if (z < 1e-4) return null;
+  return {
+    x: view.fx * (x / z) + view.cx,
+    y: view.fy * (y / z) + view.cy,
+    z
+  };
+}
+var FRUSTUM_Z = 0.22;
+var THUMB_W = 72;
+var CamVizOverlay = class {
+  canvas;
+  ctx;
+  thumbs = /* @__PURE__ */ new Map();
+  bakeKey = "";
+  enabled = false;
+  constructor(host) {
+    this.canvas = document.createElement("canvas");
+    this.canvas.id = "cam-viz";
+    Object.assign(this.canvas.style, {
+      position: "fixed",
+      inset: "0",
+      width: "100%",
+      height: "100%",
+      pointerEvents: "none",
+      zIndex: "4"
+    });
+    host.appendChild(this.canvas);
+    this.ctx = this.canvas.getContext("2d");
+  }
+  clearThumbs() {
+    for (const b of this.thumbs.values()) b.close();
+    this.thumbs.clear();
+    this.bakeKey = "";
+  }
+  setSceneKey(key) {
+    if (key === this.bakeKey) return;
+    this.clearThumbs();
+    this.bakeKey = key;
+  }
+  hasThumb(name) {
+    return this.thumbs.has(name);
+  }
+  async putThumb(name, source) {
+    const prev = this.thumbs.get(name);
+    prev?.close();
+    this.thumbs.set(name, await createImageBitmap(source));
+  }
+  thumbSize(cam) {
+    const w = THUMB_W;
+    return { w, h: Math.max(48, Math.round(w * cam.h / cam.w)) };
+  }
+  resize(cssW, cssH, pixelW, pixelH) {
+    if (this.canvas.width === pixelW && this.canvas.height === pixelH) return;
+    this.canvas.width = pixelW;
+    this.canvas.height = pixelH;
+    this.canvas.style.width = cssW + "px";
+    this.canvas.style.height = cssH + "px";
+  }
+  draw(view, cams) {
+    const ctx = this.ctx;
+    const W = this.canvas.width, H = this.canvas.height;
+    ctx.clearRect(0, 0, W, H);
+    if (!this.enabled || !cams.length) return;
+    const sx = W / view.width, sy = H / view.height;
+    for (const cam of cams) {
+      const origin = camposOf(cam.R, cam.t);
+      const z = FRUSTUM_Z;
+      const hx = 0.5 * cam.w / cam.fx * z;
+      const hy = 0.5 * cam.h / cam.fy * z;
+      const corners = [
+        camToWorld(cam.R, cam.t, [-hx, -hy, z]),
+        camToWorld(cam.R, cam.t, [hx, -hy, z]),
+        camToWorld(cam.R, cam.t, [hx, hy, z]),
+        camToWorld(cam.R, cam.t, [-hx, hy, z])
+      ];
+      const po = project(view, origin);
+      const pc = corners.map((p) => project(view, p));
+      if (!po || pc.some((p) => !p)) continue;
+      const o = { x: po.x * sx, y: po.y * sy };
+      const c = pc.map((p) => ({ x: p.x * sx, y: p.y * sy }));
+      ctx.strokeStyle = "rgba(200, 241, 53, 0.85)";
+      ctx.fillStyle = "rgba(200, 241, 53, 0.12)";
+      ctx.lineWidth = Math.max(1, W * 12e-4);
+      ctx.beginPath();
+      ctx.moveTo(c[0].x, c[0].y);
+      for (let i = 1; i < 4; i++) ctx.lineTo(c[i].x, c[i].y);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.beginPath();
+      for (const q of c) {
+        ctx.moveTo(o.x, o.y);
+        ctx.lineTo(q.x, q.y);
+      }
+      ctx.stroke();
+      const thumb = this.thumbs.get(cam.name);
+      const mid = {
+        x: (c[0].x + c[1].x + c[2].x + c[3].x) / 4,
+        y: (c[0].y + c[1].y + c[2].y + c[3].y) / 4
+      };
+      const bw = Math.hypot(c[1].x - c[0].x, c[1].y - c[0].y);
+      const bh = Math.hypot(c[3].x - c[0].x, c[3].y - c[0].y);
+      if (thumb && bw > 4 && bh > 4) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(c[0].x, c[0].y);
+        for (let i = 1; i < 4; i++) ctx.lineTo(c[i].x, c[i].y);
+        ctx.closePath();
+        ctx.clip();
+        const minX = Math.min(c[0].x, c[1].x, c[2].x, c[3].x);
+        const maxX = Math.max(c[0].x, c[1].x, c[2].x, c[3].x);
+        const minY = Math.min(c[0].y, c[1].y, c[2].y, c[3].y);
+        const maxY = Math.max(c[0].y, c[1].y, c[2].y, c[3].y);
+        ctx.drawImage(thumb, minX, minY, maxX - minX, maxY - minY);
+        ctx.restore();
+        ctx.strokeStyle = "rgba(232, 228, 220, 0.7)";
+        ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
+      } else {
+        const tw = Math.max(28, bw * 0.9);
+        const th = tw * (cam.h / cam.w);
+        ctx.fillStyle = "rgba(12, 14, 16, 0.75)";
+        ctx.fillRect(mid.x - tw / 2, mid.y - th / 2, tw, th);
+        ctx.strokeStyle = "rgba(200, 241, 53, 0.7)";
+        ctx.strokeRect(mid.x - tw / 2, mid.y - th / 2, tw, th);
+      }
+      ctx.fillStyle = "rgba(232, 228, 220, 0.95)";
+      ctx.font = `${Math.max(10, Math.round(W * 0.011))}px "IBM Plex Mono", ui-monospace, monospace`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      ctx.fillText(cam.name, mid.x, Math.max(c[0].y, c[1].y, c[2].y, c[3].y) + 4);
+    }
+  }
+};
+
 // src/main.ts
 var Q = new URLSearchParams(location.search);
 var QUEST = Q.get("quest") === "1";
@@ -3864,6 +4017,64 @@ async function main() {
   addEventListener("resize", resize);
   const renderer = new Renderer(device, format, hasTs);
   renderer.sortEvery = Math.max(1, Math.round(qnum("sortevery", 2, 1)));
+  const camViz = new CamVizOverlay(document.body);
+  const camVizBox = document.getElementById("camviz");
+  const setCamViz = (on) => {
+    camViz.enabled = on;
+    if (camVizBox) camVizBox.checked = on;
+  };
+  setCamViz(!!camVizBox?.checked);
+  camVizBox?.addEventListener("change", () => setCamViz(camVizBox.checked));
+  let thumbCanvas = null;
+  let thumbGpu = null;
+  let thumbBaking = false;
+  let thumbCursor = 0;
+  const bakeThumb = async (g, t) => {
+    if (!camViz.enabled || thumbBaking || !scene.testcams.length) return;
+    const cams = scene.testcams;
+    let idx = -1;
+    for (let k = 0; k < cams.length; k++) {
+      const i = (thumbCursor + k) % cams.length;
+      if (!camViz.hasThumb(cams[i].name)) {
+        idx = i;
+        break;
+      }
+    }
+    if (idx < 0) return;
+    thumbCursor = idx + 1;
+    const tc = cams[idx];
+    const { w, h } = camViz.thumbSize(tc);
+    thumbBaking = true;
+    try {
+      if (!thumbCanvas || !thumbGpu) {
+        thumbCanvas = document.createElement("canvas");
+        thumbGpu = thumbCanvas.getContext("webgpu");
+        if (!thumbGpu) return;
+      }
+      if (thumbCanvas.width !== w || thumbCanvas.height !== h) {
+        thumbCanvas.width = w;
+        thumbCanvas.height = h;
+        thumbGpu.configure({ device, format, alphaMode: "opaque" });
+      }
+      const cam = camFromRt(
+        tc.R,
+        tc.t,
+        tc.fx * (w / tc.w),
+        tc.fy * (h / tc.h),
+        tc.cx * (w / tc.w),
+        tc.cy * (h / tc.h),
+        w,
+        h
+      );
+      renderer.frame(g, t, cam, thumbGpu.getCurrentTexture(), {});
+      await device.queue.onSubmittedWorkDone();
+      await camViz.putThumb(tc.name, thumbCanvas);
+    } catch (e) {
+      console.warn("cam viz thumb bake failed", e);
+    } finally {
+      thumbBaking = false;
+    }
+  };
   const shadowOn = (Q.get("shadow") ?? "1") !== "0";
   renderer.shadow = shadowOn;
   renderer.shadowStride = Math.max(1, Math.round(qnum("shadowstride", 4, 1)));
@@ -4248,11 +4459,17 @@ async function main() {
     if (!name) return;
     await loadScene(name, holding);
   };
+  let carouselSteps = 0;
   const advance = async () => {
     if (switching || holding) return;
     switching = true;
     try {
       await stepVariant(1);
+      carouselSteps++;
+      if (carousel.length > 0 && carouselSteps >= carousel.length) {
+        carouselSteps = 0;
+        setCamViz(!camViz.enabled);
+      }
     } finally {
       switching = false;
     }
@@ -4336,6 +4553,14 @@ async function main() {
       overlay.textContent = statusText(seq, t, g ? g.ps.n : 0);
     };
     if (frames % 15 === 0) hud();
+    camViz.resize(canvas.clientWidth, canvas.clientHeight, canvas.width, canvas.height);
+    camViz.setSceneKey(sceneName);
+    if (camViz.enabled) {
+      camViz.draw(currentCam(), scene.testcams);
+      if (g) void bakeThumb(g, t);
+    } else {
+      camViz.draw(currentCam(), []);
+    }
     void t;
     void seq;
     requestAnimationFrame(tick);
