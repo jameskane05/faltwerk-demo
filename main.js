@@ -5255,14 +5255,12 @@ async function main() {
     const pose = frame.getViewerPose(stage.refSpace);
     xrFrames++;
     if (pose && !placed?.locked) {
-      const entry = currentCam();
-      const dist = scene.orbit.dist;
-      const fwd = [entry.view[2], entry.view[6], entry.view[10]];
-      const center = scene.orbit.center;
-      const cam = [center[0] - fwd[0] * dist, center[1] - fwd[1] * dist, center[2] - fwd[2] * dist];
+      const o = scene.orbit;
+      const center = o.center;
+      const f = o.front;
+      const cam = [center[0] + f[0] * o.dist, center[1] + f[1] * o.dist, center[2] + f[2] * o.dist];
       const hm = pose.transform.matrix;
-      const up = scene.orbit.up;
-      const next = place(cam, center, [up[0], up[1], up[2]], [hm[12], hm[13], hm[14]], [-hm[8], -hm[9], -hm[10]], xrDist);
+      const next = place(cam, center, [o.up[0], o.up[1], o.up[2]], [hm[12], hm[13], hm[14]], [-hm[8], -hm[9], -hm[10]], xrDist);
       if (next) {
         next.locked = !pose.emulatedPosition || xrFrames > 30;
         placed = next;
