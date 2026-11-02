@@ -13,8 +13,9 @@ This repo is a convenience slice that shows how to isolate playback outside the 
 
 ## Live
 
-- Desktop: https://jameskane05.github.io/4dgs-holograms/
-- Quest 3 (MR profile): https://jameskane05.github.io/4dgs-holograms/?quest=1
+- https://jameskane05.github.io/4dgs-holograms/
+
+Quest Browser is detected automatically and uses the MR profile. `?quest=1` forces that profile; `?quest=0` forces the desktop one.
 
 Quest Browser 146+, enable **WebXR experiments** in `chrome://flags`, then hard-reload. Tap **MR**, place the hologram, double-pinch to show/hide the colour desk.
 

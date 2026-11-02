@@ -397,6 +397,20 @@ fn fs(v: VOut) -> FragOut {
   o.color = vec4f(v.col.rgb * alpha, alpha);
   return o;
 }
+
+@fragment
+fn fs_color(v: VOut) -> @location(0) vec4f {
+  let d = v.d;
+  let sigma = 0.5 * (v.conic.x * d.x * d.x + v.conic.z * d.y * d.y) + v.conic.y * d.x * d.y;
+  if (sigma < 0.0) { discard; }
+  let alpha = min(0.999, v.col.w * exp(-sigma));
+  if (alpha < 1.0 / 255.0) { discard; }
+  if (real_occludes(v.pos.xy, v.z)) {
+    if (O.dbg.x < 0.5) { discard; }
+    return vec4f(alpha, 0.0, 0.0, alpha);
+  }
+  return vec4f(v.col.rgb * alpha, alpha);
+}
 `
 );
 var SHADOW_RASTER_WGSL = (
@@ -1257,6 +1271,14 @@ var Renderer = class {
       ] },
       primitive: { topology: "triangle-strip" }
     });
+    this.rasterPipeColor = device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [rasterBGL, this.occLayout] }),
+      vertex: { module: rm, entryPoint: "vs" },
+      fragment: { module: rm, entryPoint: "fs_color", targets: [
+        { format: "rgba16float", blend: { color: blend, alpha: blend } }
+      ] },
+      primitive: { topology: "triangle-strip" }
+    });
     const smSh = mod(SHADOW_RASTER_WGSL);
     const shadowBGL = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility: V, buffer: { type: "uniform" } },
@@ -1905,27 +1927,28 @@ struct D { srcSize: vec2f, tile: vec2f };
       pass.end();
     }
     const targetView = this.viewOf(target);
-    const bodyDepth = this.ensureBodyDepth(target.width, target.height);
+    const bodyDepth = this.bodyDepthOn && dest?.kind === "canvas" ? this.ensureBodyDepth(target.width, target.height) : null;
+    const color0 = {
+      view: targetView,
+      clearValue: { r: 0, g: 0, b: 0, a: 0 },
+      loadOp: "clear",
+      storeOp: "store"
+    };
     const rp = enc.beginRenderPass({
-      colorAttachments: [{
-        view: targetView,
-        clearValue: { r: 0, g: 0, b: 0, a: 0 },
-        loadOp: "clear",
-        storeOp: "store"
-      }, {
+      colorAttachments: bodyDepth ? [color0, {
         view: this.viewOf(bodyDepth),
         clearValue: { r: 1000, g: 0, b: 0, a: 0 },
         loadOp: "clear",
         storeOp: "store"
-      }],
+      }] : [color0],
       timestampWrites: tw(3)
     });
-    rp.setPipeline(this.rasterPipe);
+    rp.setPipeline(bodyDepth ? this.rasterPipe : this.rasterPipeColor);
     rp.setBindGroup(0, bgs.raster);
     rp.setBindGroup(1, occ);
     rp.drawIndirect(this.indirect, 0);
     rp.end();
-    if (dest?.kind === "canvas") this.captureBodyDepth(enc, bodyDepth);
+    if (bodyDepth && (this.depthTick = (this.depthTick + 1) | 0) % 2 === 0) this.captureBodyDepth(enc, bodyDepth);
     if (this.shadow) {
       this.ensureShadowTarget(target.width, target.height);
       const shTex = this.shadowTarget;
@@ -1989,7 +2012,7 @@ struct D { srcSize: vec2f, tile: vec2f };
       }
       bp.draw(3);
       bp.end();
-      if (this.camMesh?.length && bodyDepth.width === dest.texture.width && bodyDepth.height === dest.texture.height)
+      if (bodyDepth && this.camMesh?.length && bodyDepth.width === dest.texture.width && bodyDepth.height === dest.texture.height)
         this.paintCams(enc, dest.texture);
     } else if (dest?.kind === "xr") {
       const eye = dest.eye;
@@ -4100,6 +4123,16 @@ var CamVizOverlay = class {
   }
   /** Load one frame-strip per rig camera. c24 plays the shared real clip on every take. */
   bind(key, take, cams) {
+    if (this.simple) {
+      if (key === this.bakeKey) return;
+      this.bakeKey = key;
+      this.posterLabel = take;
+      const img = new Image();
+      img.decoding = "async";
+      img.src = new URL(`synth/${take}/c00.jpg`, import.meta.url).href;
+      this.poster = img;
+      return;
+    }
     if (key === this.bakeKey) return;
     this.strips.clear();
     this.bakeKey = key;
@@ -4132,6 +4165,23 @@ var CamVizOverlay = class {
     const ctx = this.ctx;
     const W = this.canvas.width, H = this.canvas.height;
     ctx.clearRect(0, 0, W, H);
+    if (this.simple) {
+      const img = this.poster;
+      if (!this.enabled || !img || !img.naturalWidth) return;
+      const sw = img.naturalWidth / SYNTH_FRAMES;
+      const sh = img.naturalHeight;
+      const maxH = Math.min(H * 0.32, 420);
+      const w = maxH * (sw / sh);
+      const x = Math.max(16, W - w - 28);
+      const y = Math.max(16, H * 0.22);
+      ctx.drawImage(img, 0, 0, sw, sh, x, y, w, maxH);
+      ctx.font = `600 ${Math.max(13, Math.round(W * 0.013))}px "IBM Plex Mono", ui-monospace, monospace`;
+      ctx.fillStyle = "#c8f135";
+      ctx.textAlign = "right";
+      ctx.textBaseline = "bottom";
+      ctx.fillText(this.posterLabel || "", x + w, y - 6);
+      return;
+    }
     if (!this.enabled || !cams.length) return;
     const sx = W / view.width, sy = H / view.height;
     const eye = [view.campos[0], view.campos[1], view.campos[2]];
@@ -4222,7 +4272,7 @@ var CamVizOverlay = class {
       ctx.strokeStyle = style;
       ctx.lineWidth = width;
       const seg = (a, b) => {
-        const N = occlude ? 14 : 1;
+        const N = occlude ? 6 : 1;
         ctx.beginPath();
         let on = false;
         for (let i = 0; i <= N; i++) {
@@ -4240,7 +4290,7 @@ var CamVizOverlay = class {
       for (const q of c) seg(o, q);
     };
     const fillQuad = (occlude) => {
-      const N = occlude ? 8 : 1;
+      const N = occlude ? 4 : 1;
       const lerp = (a, b, t) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: a.z + (b.z - a.z) * t });
       const at = (u, v) => lerp(lerp(c[0], c[1], u), lerp(c[3], c[2], u), v);
       for (let j = 0; j < N; j++) {
@@ -4340,7 +4390,9 @@ var CamVizOverlay = class {
 
 // src/main.ts
 var Q = new URLSearchParams(location.search);
-var QUEST = Q.get("quest") === "1";
+var questQuery = Q.get("quest");
+var QUEST = questQuery === "1" || (questQuery !== "0" && /OculusBrowser|\bQuest\b/i.test(navigator.userAgent));
+var LIGHT = QUEST || /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && matchMedia("(pointer: coarse)").matches);
 var qnum = (k, quest, dflt) => {
   const v = Number(Q.get(k) ?? (QUEST ? quest : dflt));
   return Number.isFinite(v) ? v : dflt;
@@ -4472,7 +4524,7 @@ async function main() {
     if (!adapter) await new Promise((r) => setTimeout(r, 200));
   }
   if (!adapter) fail(tr("kein WebGPU-Adapter", "no WebGPU adapter"));
-  const hasTs = adapter.features.has("timestamp-query") && Q.get("ts") !== "0";
+  const hasTs = !LIGHT && adapter.features.has("timestamp-query") && Q.get("ts") !== "0";
   const device = await adapter.requestDevice({
     requiredFeatures: hasTs ? ["timestamp-query"] : [],
     requiredLimits: { maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize, maxBufferSize: adapter.limits.maxBufferSize }
@@ -4503,7 +4555,8 @@ async function main() {
     }
     return offTex;
   };
-  const dpr = Number(Q.get("dpr") ?? Math.min(devicePixelRatio || 1, 2));
+  const dprCap = LIGHT ? (QUEST ? 1 : 1.25) : 2;
+  const dpr = Number(Q.get("dpr") ?? Math.min(devicePixelRatio || 1, dprCap));
   const resize = () => {
     canvas.width = Math.max(1, Math.round(canvas.clientWidth * dpr));
     canvas.height = Math.max(1, Math.round(canvas.clientHeight * dpr));
@@ -4511,8 +4564,10 @@ async function main() {
   resize();
   addEventListener("resize", resize);
   const renderer = new Renderer(device, format, hasTs);
-  renderer.sortEvery = Math.max(1, Math.round(qnum("sortevery", 2, 1)));
+  renderer.sortEvery = Math.max(1, Math.round(Number(Q.get("sortevery") ?? (LIGHT ? 3 : 2))));
+  renderer.bodyDepthOn = false;
   const camViz = new CamVizOverlay(document.body);
+  camViz.simple = LIGHT;
   const camVizBox = document.getElementById("camviz");
   const setCamViz = (on) => {
     camViz.enabled = on;
@@ -4524,14 +4579,16 @@ async function main() {
   const realVideo = document.createElement("video");
   realVideo.muted = true;
   realVideo.playsInline = true;
-  realVideo.preload = "auto";
-  realVideo.src = new URL("./real/angry_j.mp4", import.meta.url).href;
+  realVideo.preload = LIGHT ? "none" : "auto";
   realVideo.hidden = true;
-  document.body.appendChild(realVideo);
-  camViz.realVideo = realVideo;
+  if (!LIGHT) {
+    realVideo.src = new URL("./real/angry_j.mp4", import.meta.url).href;
+    document.body.appendChild(realVideo);
+    camViz.realVideo = realVideo;
+  }
   const shadowOn = (Q.get("shadow") ?? "1") !== "0";
   renderer.shadow = shadowOn;
-  renderer.shadowStride = Math.max(1, Math.round(qnum("shadowstride", 2, 1)));
+  renderer.shadowStride = Math.max(1, Math.round(Number(Q.get("shadowstride") ?? (LIGHT ? 4 : 2))));
   renderer.shadowStrength = qnum("shadowstr", 0.9, 0.85);
   renderer.shadowFloorY = Number(Q.get("floory") ?? 0);
   const storedRaw = setting("shadowfade");
@@ -4629,7 +4686,7 @@ async function main() {
     if (!c || c.decoded[seq]) return;
     c.decoded[seq] = ps;
   };
-  const residentMiB = qnum("resident", 512, 1024);
+  const residentMiB = Number(Q.get("resident") ?? (QUEST ? 384 : LIGHT ? 512 : 1024));
   let resident = residentMiB > 0 ? /* @__PURE__ */ new Map() : null;
   let residentBytes = 0;
   const residentFull = () => !!resident && resident.size === nsec;
@@ -4755,7 +4812,7 @@ async function main() {
       io.range.value = String(live[s.field]);
       io.num.value = String(live[s.field]);
     }
-    if (holding) recolorInfo.textContent = describeGrade(live);
+    if (holding && recolorInfo) recolorInfo.textContent = describeGrade(live);
   };
   const rememberGrade = () => {
     saveGrade(sceneName, live);
@@ -4780,7 +4837,7 @@ async function main() {
     const apply = (v) => {
       if (!Number.isFinite(v)) return;
       live[s.field] = Math.min(s.max, Math.max(s.min, v));
-      recolorBox.checked = false;
+      if (recolorBox) recolorBox.checked = false;
       rememberGrade();
     };
     range.addEventListener("input", () => apply(Number(range.value)));
@@ -4798,7 +4855,7 @@ async function main() {
       desk.editing = holding;
       desk.dirty = true;
     }
-    if (!holding) recolorInfo.textContent = "";
+    if (!holding && recolorInfo) recolorInfo.textContent = "";
     showGrade();
   };
   let desk = null;
@@ -4807,16 +4864,16 @@ async function main() {
     if (desk) return desk;
     desk = new GradeDesk(live);
     desk.onChange = () => {
-      recolorBox.checked = false;
+      recolorBox && (recolorBox.checked = false);
       rememberGrade();
     };
     desk.onButton = (id) => {
       if (id === "reset") {
         Object.assign(live, NEUTRAL);
-        recolorBox.checked = false;
+        if (recolorBox) recolorBox.checked = false;
         rememberGrade();
       } else if (id === "auto") {
-        recolorBox.checked = true;
+        if (recolorBox) recolorBox.checked = true;
         if (xr) void autoGrade(xr);
       } else if (id === "prev" || id === "next") void stepVariant(id === "next" ? 1 : -1);
       else if (id === "hold") {
@@ -5025,7 +5082,8 @@ async function main() {
       gpuBound++;
       bumpPlay(dt);
     } else if (g) {
-      renderer.frame(g, t, currentCam(), outTexture(), { timing: true, readVisible: frames % 10 === 0 });
+      renderer.bodyDepthOn = !LIGHT && camViz.enabled;
+      renderer.frame(g, t, currentCam(), outTexture(), { timing: hasTs && frames % 20 === 0, readVisible: frames % (LIGHT ? 30 : 10) === 0 });
       inflight++;
       device.queue.onSubmittedWorkDone().then(() => {
         inflight--;
@@ -5050,7 +5108,7 @@ async function main() {
     if (frames % 15 === 0) hud();
     camViz.resize(canvas.clientWidth, canvas.clientHeight, canvas.width, canvas.height);
     const take = sceneLabel(sceneName);
-    camViz.realActive = true;
+    camViz.realActive = !LIGHT;
     camViz.bind(sceneName, take, scene.testcams);
     if (!camViz.realActive || !camViz.enabled) {
       if (!realVideo.paused) realVideo.pause();
@@ -5077,14 +5135,49 @@ async function main() {
     requestAnimationFrame(tick);
   };
   requestAnimationFrame(tick);
+  const touches = new Map();
+  let pinch = 0;
+  const touchSpan = () => {
+    const p = [...touches.values()];
+    return Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
+  };
   canvas.addEventListener("pointerdown", (e) => {
-    drag = { x: e.clientX, y: e.clientY };
-    canvas.setPointerCapture(e.pointerId);
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic or already released */ }
+    if (touches.size >= 2) {
+      drag = null;
+      pinch = touchSpan();
+    } else {
+      drag = { x: e.clientX, y: e.clientY };
+    }
   });
-  canvas.addEventListener("pointerup", () => {
-    drag = null;
-  });
+  const endTouch = (e) => {
+    touches.delete(e.pointerId);
+    if (touches.size >= 2) {
+      drag = null;
+      pinch = touchSpan();
+    } else if (touches.size === 1) {
+      const p = [...touches.values()][0];
+      drag = { x: p.x, y: p.y };
+      pinch = 0;
+    } else {
+      drag = null;
+      pinch = 0;
+    }
+  };
+  canvas.addEventListener("pointerup", endTouch);
+  canvas.addEventListener("pointercancel", endTouch);
   canvas.addEventListener("pointermove", (e) => {
+    if (!touches.has(e.pointerId)) return;
+    touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (touches.size >= 2) {
+      const d = touchSpan();
+      if (pinch > 0 && d > 0) distScale *= pinch / d;
+      pinch = d;
+      drag = null;
+      return;
+    }
     if (!drag) return;
     stopOrbit(true);
     az -= (e.clientX - drag.x) * 0.01;
@@ -5099,7 +5192,7 @@ async function main() {
     playing = !playing;
   });
   const xrScaleQ = qnum("xrscale", 1, 1);
-  const xrRenderScale = Math.min(1, Math.max(0.3, qnum("xrrs", 0.7, 1)));
+  const xrRenderScale = Math.min(1, Math.max(0.3, qnum("xrrs", 0.55, 1)));
   const xrLayerScale = Number.isFinite(xrScaleQ) && xrScaleQ > 0 ? xrScaleQ : 1;
   const xrFovQ = Q.get("foveation") ?? (QUEST ? "1" : null);
   const xrOpts = {
@@ -5114,16 +5207,16 @@ async function main() {
   const recolorStrength = Number.isFinite(recolorQ) && recolorQ >= 0 ? recolorQ : 0.6;
   let xr = null;
   const autoGrade = async (stage) => {
-    recolorInfo.textContent = tr("Kamera \u2026", "Camera \u2026");
+    if (recolorInfo) recolorInfo.textContent = tr("Kamera \u2026", "Camera \u2026");
     let room;
     try {
       room = await captureRoom();
     } catch (e) {
       console.warn("MR: recolor", e);
-      recolorInfo.textContent = tr("Kamera: ", "Camera: ") + (e instanceof Error ? e.message : e);
+      if (recolorInfo) recolorInfo.textContent = tr("Kamera: ", "Camera: ") + (e instanceof Error ? e.message : e);
       return;
     }
-    if (xr !== stage || !recolorBox.checked) {
+    if (xr !== stage || !recolorBox?.checked) {
       showGrade();
       return;
     }
@@ -5132,7 +5225,7 @@ async function main() {
     rememberGrade();
     console.info(`MR: recolor ${describeGrade(live)}`);
   };
-  recolorBox.addEventListener("change", () => {
+  recolorBox?.addEventListener("change", () => {
     if (recolorBox.checked) {
       if (xr) void autoGrade(xr);
       return;
@@ -5180,7 +5273,7 @@ async function main() {
       d.head = head2;
       if (!d.placed) d.place(head2, [-hm[8], -hm[9], -hm[10]]);
     }
-    const deskOn = !!desk?.placed && document.getElementById("desk").checked;
+    const deskOn = !!desk?.placed && !!document.getElementById("desk")?.checked;
     if (placed?.locked) stage.pinch(frame, placed, time, deskOn ? desk : null);
     if (g && inflight >= 2) {
       gpuBound++;
@@ -5253,12 +5346,25 @@ async function main() {
     saveSetting("occdebug", occDebugBox.checked ? "1" : "0");
     if (xr) xr.occDebug = occDebugBox.checked;
   });
-  if (xrReady) {
+  if (navigator.xr) {
     xrButton.hidden = false;
-    document.getElementById("occ-box").hidden = false;
-    document.getElementById("occ-debug-box").hidden = false;
-    document.getElementById("desk-box").hidden = false;
+    const occWrap = document.getElementById("occ-box");
+    const occDebugWrap = document.getElementById("occ-debug-box");
+    const deskWrap = document.getElementById("desk-box");
+    if (occWrap) occWrap.hidden = !xrReady;
+    if (occDebugWrap) occDebugWrap.hidden = !xrReady;
+    if (deskWrap) deskWrap.hidden = !xrReady;
+    const showMrProblem = (msg) => {
+      const hint = document.getElementById("xr-hint");
+      if (!hint) return;
+      hint.hidden = false;
+      hint.textContent = "MR: " + msg;
+    };
     xrButton.addEventListener("click", () => {
+      if (!xrReady) {
+        showMrProblem((xrProblem || "unavailable") + questHint());
+        return;
+      }
       if (xr) {
         void xr.session.end();
         return;
@@ -5295,17 +5401,18 @@ async function main() {
           xrButton.textContent = "Exit";
           stage.onDoublePinch = () => {
             holding = !holding;
-            if (holding) {
-              document.getElementById("desk").checked = true;
+            const deskEl = document.getElementById("desk");
+            if (holding && deskEl) {
+              deskEl.checked = true;
               ensureDesk();
             }
             showHoldUi();
           };
           stage.session.requestAnimationFrame(onXR);
-          if (holding && recolorBox.checked) void autoGrade(stage);
+          if (holding && recolorBox?.checked) void autoGrade(stage);
         } catch (e) {
           console.error("MR", e);
-          overlay.textContent = "MR: " + (e instanceof Error ? e.message : e);
+          showMrProblem(e instanceof Error ? e.message : String(e));
           xrButton.textContent = "MR";
         } finally {
           xrButton.disabled = false;

@@ -275,8 +275,9 @@
 
 <script>
   const questLink = document.getElementById('quest-link');
+  const onQuest = /OculusBrowser|\bQuest\b/i.test(navigator.userAgent);
   questLink.href = location.pathname.replace(/\/?$/, '/') + '?quest=1';
-  if (navigator.xr && navigator.xr.isSessionSupported) {
+  if (!onQuest && navigator.xr && navigator.xr.isSessionSupported) {
     navigator.xr.isSessionSupported('immersive-ar').then((ok) => { if (ok) questLink.hidden = false; }).catch(() => {});
   }
 
