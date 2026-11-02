@@ -75,6 +75,7 @@
   .meta { margin: 0 0 0.85rem; }
   .perf { margin: 0 0 1.1rem; }
   .meta span, .perf span { color: var(--mute); display: block; }
+  .perf span em { font-style: normal; opacity: 0.75; }
   .meta strong, .perf strong {
     color: var(--ink); font-weight: 500; font-variant-numeric: tabular-nums;
   }
@@ -186,10 +187,10 @@
     </div>
     <div class="perf" aria-live="polite">
       <div><span>FPS</span><strong id="stat-fps">…</strong></div>
-      <div><span>Splats</span><strong id="stat-splats">…</strong></div>
       <div><span>GPU</span><strong id="stat-gpu">…</strong></div>
       <div><span>VRAM</span><strong id="stat-vram">…</strong></div>
       <div><span>Bitrate</span><strong id="stat-mbps">…</strong></div>
+      <div><span>Splats <em>(total · drawn)</em></span><strong id="stat-splats">…</strong></div>
     </div>
     <div class="actions">
       <a class="btn-ghost" id="quest-link" href="?quest=1" hidden>Quest 3 MR</a>
@@ -302,10 +303,9 @@
     const vram = text.match(/([\d.]+)\s*MiB/i);
     if (fps) els.fps.textContent = fps[1];
     if (splats) {
-      const n = splats[1].replace(/,/g, '');
-      els.splats.textContent = visible
-        ? `${Number(n).toLocaleString()} (${Number(visible[1].replace(/,/g, '')).toLocaleString()})`
-        : Number(n).toLocaleString();
+      const n = Number(splats[1].replace(/,/g, '')).toLocaleString();
+      const v = visible ? Number(visible[1].replace(/,/g, '')).toLocaleString() : '—';
+      els.splats.textContent = `${n} · ${v}`;
     }
     if (gpu) els.gpu.textContent = Number(gpu[1]).toFixed(2) + ' ms';
     if (vram) els.vram.textContent = vram[1] + ' MiB';
