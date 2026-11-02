@@ -458,15 +458,16 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut 
   if (z < C.size.z || z > 1e10) { return o; }
   let so = world[idx * 4u + 2u];
   let sc = 0.333 * (exp(so.x) + exp(so.y) + exp(so.z));
-  // Inflate so sparse foot splats merge into a soft contact blob instead of grain.
-  let worldR = clamp(max(sc * 3.0, 0.03) * (1.0 + 0.4 * t), 0.03, S.params.y);
+  // Volume splats larger than the cap become the scalloped outline. Dense small ones carry the shape.
+  if (sc > S.params.y) { return o; }
+  let worldR = clamp(sc * 1.5, 0.01, S.params.y);
   let fx = C.intr.x; let fy = C.intr.y;
   let mean2 = vec2f(fx * mc.x / z + C.intr.z, fy * mc.y / z + C.intr.w);
   let rad = worldR * 0.5 * (fx + fy) / z;
   if (rad < 0.75) { return o; }
   let opSplat = 1.0 / (1.0 + exp(-so.w));
   let fadeK = clamp(1.0 - h / fade, 0.0, 1.0);
-  let op = min(0.82, opSplat * S.params.x * fadeK * fadeK);
+  let op = min(0.72, opSplat * S.params.x * fadeK * fadeK);
   if (op < 1.0 / 255.0) { return o; }
   let corner = vec2f(f32(vi & 1u) * 2.0 - 1.0, f32((vi >> 1u) & 1u) * 2.0 - 1.0);
   let px = mean2 + corner * rad;
@@ -487,7 +488,8 @@ fn fs(v: VOut) -> @location(0) vec4f {
   let alpha = v.op * exp(-r * r / (soft * soft));
   if (alpha < 1.0 / 255.0) { discard; }
   if (real_occludes(v.pos.xy, v.z)) { discard; }
-  return vec4f(0.0, 0.0, 0.0, alpha);
+  // Write coverage into every channel so a buggy alpha-only max-blend still survives.
+  return vec4f(alpha, alpha, alpha, alpha);
 }
 `
 );
@@ -509,6 +511,34 @@ fn graded(c: vec4f, G: Grade) -> vec3f {
 }
 `
 );
+var SHADOW_COMPOSE_WGSL = (
+  /* wgsl */
+  `
+@group(0) @binding(0) var color: texture_2d<f32>;
+@group(0) @binding(1) var shadow: texture_2d<f32>;
+@vertex
+fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
+  let p = vec2f(f32((vi << 1u) & 2u), f32(vi & 2u));
+  return vec4f(p * 2.0 - 1.0, 0.0, 1.0);
+}
+@fragment
+fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
+  let uv = vec2i(p.xy);
+  let c = textureLoad(color, uv, 0);
+  let shSize = vec2i(textureDimensions(shadow));
+  let sp = min(uv, shSize - vec2i(1));
+  let s = textureLoad(shadow, sp, 0);
+  var sa = clamp(max(max(s.r, s.g), max(s.b, s.a)), 0.0, 1.0);
+  // DEBUG: hard floor oval under the subject so a dead shadow pass is still visible.
+  let dims = vec2f(textureDimensions(color));
+  let q = (vec2f(uv) / dims) * 2.0 - 1.0;
+  let oval = 1.0 - clamp(length((q - vec2f(0.0, 0.55)) / vec2f(0.22, 0.08)), 0.0, 1.0);
+  sa = max(sa, oval * 0.55);
+  let a = clamp(c.a, 0.0, 1.0);
+  return vec4f(c.rgb, a + (1.0 - a) * sa);
+}
+`
+);
 var BLIT_WGSL = (
   /* wgsl */
   `
@@ -516,8 +546,24 @@ ${GRADE_WGSL}
 struct BlitU { bg: vec4f, grade: Grade };
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var<uniform> U: BlitU;
-// Planar floor shadow (max-blended discs); a=0 when shadows are off (1\xD71 stub).
 @group(0) @binding(2) var shadow: texture_2d<f32>;
+fn shadowCov(p: vec2i) -> f32 {
+  let shSize = vec2i(textureDimensions(shadow));
+  let s = textureLoad(shadow, clamp(p, vec2i(0), shSize - vec2i(1)), 0);
+  return clamp(max(max(s.r, s.g), max(s.b, s.a)), 0.0, 1.0);
+}
+fn shadowBlur(p: vec2i) -> f32 {
+  var a = 0.0;
+  var wsum = 0.0;
+  for (var y = -4; y <= 4; y++) {
+    for (var x = -4; x <= 4; x++) {
+      let w = 1.0 / (1.0 + f32(x * x + y * y) * 0.35);
+      a += w * shadowCov(p + vec2i(x, y) * 3);
+      wsum += w;
+    }
+  }
+  return a / wsum;
+}
 @vertex
 fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
   let p = vec2f(f32((vi << 1u) & 2u), f32(vi & 2u));
@@ -526,11 +572,8 @@ fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
 @fragment
 fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
   let c = textureLoad(src, vec2i(p.xy), 0);
-  let shSize = vec2i(textureDimensions(shadow));
-  let sp = min(vec2i(p.xy), shSize - vec2i(1));
-  let sa = clamp(textureLoad(shadow, sp, 0).a, 0.0, 1.0);
+  let sa = shadowBlur(vec2i(p.xy));
   let hole = 1.0 - clamp(c.a, 0.0, 1.0);
-  // Darken only the background term so the person stays clean.
   return vec4f(clamp(graded(c, U.grade) + hole * (1.0 - sa) * U.bg.rgb, vec3f(0.0), vec3f(1.0)), 1.0);
 }
 `
@@ -546,6 +589,23 @@ struct BlitU { origin: vec2f, flags: vec2f, grade: Grade, hud: vec4f, rs: vec4f 
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var<uniform> U: BlitU;
 @group(0) @binding(2) var shadow: texture_2d<f32>;
+fn shadowCov(p: vec2i) -> f32 {
+  let shSize = vec2i(textureDimensions(shadow));
+  let s = textureLoad(shadow, clamp(p, vec2i(0), shSize - vec2i(1)), 0);
+  return clamp(max(max(s.r, s.g), max(s.b, s.a)), 0.0, 1.0);
+}
+fn shadowBlur(p: vec2i) -> f32 {
+  var a = 0.0;
+  var wsum = 0.0;
+  for (var y = -4; y <= 4; y++) {
+    for (var x = -4; x <= 4; x++) {
+      let w = 1.0 / (1.0 + f32(x * x + y * y) * 0.35);
+      a += w * shadowCov(p + vec2i(x, y) * 3);
+      wsum += w;
+    }
+  }
+  return a / wsum;
+}
 
 fn lin2srgb(c: vec3f) -> vec3f {
   let lo = c * 12.92;
@@ -609,10 +669,7 @@ fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
     hdims = vec2f(dims) / U.rs.xy;
   }
   var rgb = graded(c, U.grade);
-  let shSize = vec2i(textureDimensions(shadow));
-  let sp = min(texel, shSize - vec2i(1));
-  let sa = clamp(textureLoad(shadow, sp, 0).a, 0.0, 1.0);
-  // keepAlpha: raise coverage with the floor shadow so passthrough darkens under the person.
+  let sa = shadowBlur(texel);
   var a = select(1.0, clamp(c.a, 0.0, 1.0) + (1.0 - clamp(c.a, 0.0, 1.0)) * sa, U.flags.x > 0.5);
   if (U.flags.x < 0.5) { rgb = rgb + (1.0 - clamp(c.a, 0.0, 1.0)) * (1.0 - sa) * vec3f(0.0); }
   if (U.hud.z > 0.5) {
@@ -1037,6 +1094,7 @@ var Renderer = class {
   sortLocal;
   rasterPipe;
   shadowPipe;
+  composePipe;
   blitPipe;
   diffPipe = null;
   evalU;
@@ -1058,8 +1116,9 @@ var Renderer = class {
   shadowScratch = new ArrayBuffer(48);
   shadowF = new Float32Array(this.shadowScratch);
   shadowI = new Uint32Array(this.shadowScratch);
-  /** Max-blended shadow discs; sampled by the blit so only the bg/passthrough hole darkens. */
+  /** Max-blended shadow discs; composed into litTarget α before the bg blit. */
   shadowTarget = null;
+  litTarget = null;
   shadowOffTex;
   sortU = null;
   sortSteps = [];
@@ -1102,6 +1161,7 @@ var Renderer = class {
   indirectReset = new Uint32Array([4, 0, 0, 0]);
   views = /* @__PURE__ */ new WeakMap();
   blitBGs = /* @__PURE__ */ new Map();
+  composeBGs = /* @__PURE__ */ new Map();
   occLayout;
   occFloat;
   occUint;
@@ -1164,6 +1224,13 @@ var Renderer = class {
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT
     });
     device.queue.writeTexture({ texture: this.shadowOffTex }, new Uint16Array(4), { bytesPerRow: 8 }, [1, 1]);
+    const cm = mod(SHADOW_COMPOSE_WGSL);
+    this.composePipe = device.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: cm, entryPoint: "vs" },
+      fragment: { module: cm, entryPoint: "fs", targets: [{ format: "rgba16float" }] },
+      primitive: { topology: "triangle-list" }
+    });
     const bm = mod(BLIT_WGSL);
     this.blitPipe = device.createRenderPipeline({
       layout: "auto",
@@ -1231,11 +1298,7 @@ var Renderer = class {
     clr.end();
     const bp = enc.beginRenderPass({ colorAttachments: [{ view: dst.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }] });
     bp.setPipeline(pipe);
-    bp.setBindGroup(0, dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [
-      { binding: 0, resource: src.createView() },
-      { binding: 1, resource: { buffer: uni } },
-      { binding: 2, resource: this.shadowOffTex.createView() }
-    ] }));
+    bp.setBindGroup(0, this.blitBindGroup(pipe, src, uni));
     bp.draw(3);
     bp.end();
     const bpr = Math.ceil(w * 4 / 256) * 256;
@@ -1446,10 +1509,19 @@ var Renderer = class {
   ensureTarget(w, h) {
     if (this.target && this.targetSize[0] === w && this.targetSize[1] === h) return;
     this.target?.destroy();
+    this.litTarget?.destroy();
+    this.blitBGs.clear();
+    this.composeBGs.clear();
     this.target = this.device.createTexture({
       size: [w, h],
       format: "rgba16float",
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC
+    });
+    this.litTarget = this.device.createTexture({
+      size: [w, h],
+      format: "rgba16float",
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
+      label: "lit-compose"
     });
     this.targetSize = [w, h];
     this.ensureShadowTarget(w, h);
@@ -1458,7 +1530,7 @@ var Renderer = class {
   ensureShadowTarget(w, h) {
     if (this.shadowTarget && this.shadowTarget.width === w && this.shadowTarget.height === h) return;
     this.shadowTarget?.destroy();
-    this.blitBGs.clear();
+    this.composeBGs.clear();
     this.shadowTarget = this.device.createTexture({
       size: [Math.max(1, w), Math.max(1, h)],
       format: "rgba16float",
@@ -1665,7 +1737,7 @@ var Renderer = class {
     rp.end();
     if (this.shadow) {
       this.ensureShadowTarget(target.width, target.height);
-      const shTex = this.shadowTarget ?? this.shadowOffTex;
+      const shTex = this.shadowTarget;
       const L = this.shadowLight;
       const len = Math.hypot(L[0], L[1], L[2]) || 1;
       const sf = this.shadowF, si = this.shadowI;
@@ -1761,6 +1833,20 @@ var Renderer = class {
       this.views.set(tex, v);
     }
     return v;
+  }
+  composeBindGroup(color, shadow) {
+    const key = `${color.width}x${color.height}`;
+    const hit = this.composeBGs.get(key);
+    if (hit) return hit;
+    const bg = this.device.createBindGroup({
+      layout: this.composePipe.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: this.viewOf(color) },
+        { binding: 1, resource: this.viewOf(shadow) }
+      ]
+    });
+    this.composeBGs.set(key, bg);
+    return bg;
   }
   blitBindGroup(pipe, src, uni) {
     const sh = this.shadow && this.shadowTarget ? this.shadowTarget : this.shadowOffTex;
@@ -3718,6 +3804,24 @@ function project(view, p) {
 }
 var FRUSTUM_Z = 0.22;
 var THUMB_W = 72;
+function behindActor(eye, point, actor) {
+  const dx = point[0] - eye[0], dy = point[1] - eye[1], dz = point[2] - eye[2];
+  const ox = eye[0] - actor.center[0], oz = eye[2] - actor.center[2];
+  const a = dx * dx + dz * dz;
+  const c = ox * ox + oz * oz - actor.radius * actor.radius;
+  const y0 = actor.center[1] - actor.halfHeight, y1 = actor.center[1] + actor.halfHeight;
+  if (a < 1e-8) return c <= 0 && eye[1] >= y0 && eye[1] <= y1 && dy * dy > 1e-8;
+  const b = 2 * (ox * dx + oz * dz);
+  const disc = b * b - 4 * a * c;
+  if (disc < 0) return false;
+  const s = Math.sqrt(disc);
+  const t0 = (-b - s) / (2 * a);
+  const t1 = (-b + s) / (2 * a);
+  const enter = t0 > 0 ? t0 : t1 > 0 ? 0 : -1;
+  if (enter < 0 || enter >= 1) return false;
+  const y = eye[1] + dy * enter;
+  return y >= y0 && y <= y1;
+}
 var CamVizOverlay = class {
   canvas;
   ctx;
@@ -3767,14 +3871,16 @@ var CamVizOverlay = class {
     this.canvas.style.width = cssW + "px";
     this.canvas.style.height = cssH + "px";
   }
-  draw(view, cams) {
+  draw(view, cams, actor) {
     const ctx = this.ctx;
     const W = this.canvas.width, H = this.canvas.height;
     ctx.clearRect(0, 0, W, H);
     if (!this.enabled || !cams.length) return;
     const sx = W / view.width, sy = H / view.height;
+    const eye = [view.campos[0], view.campos[1], view.campos[2]];
     for (const cam of cams) {
       const origin = camposOf(cam.R, cam.t);
+      if (actor && behindActor(eye, origin, actor)) continue;
       const z = FRUSTUM_Z;
       const hx = 0.5 * cam.w / cam.fx * z;
       const hy = 0.5 * cam.h / cam.fy * z;
@@ -3789,8 +3895,8 @@ var CamVizOverlay = class {
       if (!po || pc.some((p) => !p)) continue;
       const o = { x: po.x * sx, y: po.y * sy };
       const c = pc.map((p) => ({ x: p.x * sx, y: p.y * sy }));
-      ctx.strokeStyle = "rgba(200, 241, 53, 0.85)";
-      ctx.fillStyle = "rgba(200, 241, 53, 0.12)";
+      ctx.strokeStyle = "rgba(58, 74, 14, 0.95)";
+      ctx.fillStyle = "rgba(58, 74, 14, 0.2)";
       ctx.lineWidth = Math.max(1, W * 12e-4);
       ctx.beginPath();
       ctx.moveTo(c[0].x, c[0].y);
@@ -3831,7 +3937,7 @@ var CamVizOverlay = class {
         const th = tw * (cam.h / cam.w);
         ctx.fillStyle = "rgba(12, 14, 16, 0.75)";
         ctx.fillRect(mid.x - tw / 2, mid.y - th / 2, tw, th);
-        ctx.strokeStyle = "rgba(200, 241, 53, 0.7)";
+        ctx.strokeStyle = "rgba(58, 74, 14, 0.9)";
         ctx.strokeRect(mid.x - tw / 2, mid.y - th / 2, tw, th);
       }
       ctx.fillStyle = "rgba(232, 228, 220, 0.95)";
@@ -3889,7 +3995,11 @@ async function sceneList() {
       codecKnown.set(n, false);
     }
   }));
-  return names.filter((n) => typeof n === "string" && codecKnown.get(n) === true).sort((a, b) => sceneLabel(a).localeCompare(sceneLabel(b)));
+  return names.filter((n) => typeof n === "string" && codecKnown.get(n) === true).sort((a, b) => {
+    const af = sceneLabel(a) === "female" ? 1 : 0;
+    const bf = sceneLabel(b) === "female" ? 1 : 0;
+    return af - bf || sceneLabel(a).localeCompare(sceneLabel(b));
+  });
 }
 var onScenePicked = () => {
 };
@@ -4077,13 +4187,14 @@ async function main() {
   };
   const shadowOn = (Q.get("shadow") ?? "1") !== "0";
   renderer.shadow = shadowOn;
-  renderer.shadowStride = Math.max(1, Math.round(qnum("shadowstride", 4, 1)));
-  renderer.shadowStrength = qnum("shadowstr", 0.75, 0.7);
+  renderer.shadowStride = Math.max(1, Math.round(qnum("shadowstride", 2, 1)));
+  renderer.shadowStrength = qnum("shadowstr", 0.9, 0.85);
   renderer.shadowFloorY = Number(Q.get("floory") ?? 0);
-  const storedFade = Number(setting("shadowfade"));
-  renderer.shadowFadeH = Number(Q.get("shadowfade") ?? (Number.isFinite(storedFade) ? storedFade : 1.8));
-  renderer.shadowMaxRad = qnum("shadowrad", 0.35, 0.32);
-  renderer.shadowSoft = qnum("shadowsoft", 0.85, 0.8);
+  const storedRaw = setting("shadowfade");
+  const storedFade = storedRaw == null || storedRaw === "" ? NaN : Number(storedRaw);
+  renderer.shadowFadeH = Number(Q.get("shadowfade") ?? (Number.isFinite(storedFade) ? storedFade : 1.15));
+  renderer.shadowMaxRad = qnum("shadowrad", 0.034, 0.026);
+  renderer.shadowSoft = qnum("shadowsoft", 0.55, 0.48);
   renderer.shadowLight = [0.55, 1, 0.35];
   const bgInput = document.getElementById("bg");
   const setBg = (hex) => {
@@ -4092,6 +4203,8 @@ async function main() {
     const [r, g, b] = [0, 2, 4].map((i) => parseInt(m[1].slice(i, i + 2), 16) / 255);
     renderer.setBackground(r, g, b);
     bgInput.value = "#" + m[1].toLowerCase();
+    const bgHex = document.getElementById("bg-hex");
+    if (bgHex) bgHex.textContent = bgInput.value;
   };
   setBg(Q.get("bg") ?? setting("bg") ?? (shadowOn ? "#d9d4cc" : "#000000"));
   bgInput.addEventListener("input", () => {
@@ -4335,9 +4448,6 @@ async function main() {
     gradeInputs.set(s.field, { range, num });
   }
   const showHoldUi = () => {
-    gradeBox.hidden = !holding;
-    gradeBox.open = holding;
-    holdBtn.textContent = holding ? tr("Weiter", "Resume") : tr("Anhalten", "Hold");
     if (desk) {
       desk.take = sceneLabel(sceneName);
       desk.editing = holding;
@@ -4477,9 +4587,11 @@ async function main() {
   onScenePicked = (name) => {
     void loadScene(name, true);
   };
+  holdBtn.textContent = "Color Settings";
   holdBtn.addEventListener("click", () => {
-    holding = !holding;
-    showHoldUi();
+    const open = gradeBox.hidden;
+    gradeBox.hidden = !open;
+    holdBtn.setAttribute("aria-expanded", String(open));
   });
   showHoldUi();
   const bumpPlay = (dt) => {
@@ -4492,7 +4604,16 @@ async function main() {
   let playing = !Q.has("pause") && fixedT === null;
   let playFrames = fixedT ?? 0;
   let lastNow = 0, stalls = 0, frames = 0, firstFrameDone = false, inflight = 0, gpuBound = 0;
-  let az = Number(Q.get("az") ?? 0) * Math.PI / 180, elev = scene.orbit.elev_deg * Math.PI / 180, distScale = Number(Q.get("zoom") ?? 1);
+  const ORBIT_ZOOM = 1.6;
+  let az = Number(Q.get("az") ?? 0) * Math.PI / 180, elev = scene.orbit.elev_deg * Math.PI / 180;
+  let distScale = Number(Q.get("zoom") ?? (document.documentElement.dataset.orbit === "1" ? ORBIT_ZOOM : 1));
+  const elev0 = elev;
+  const ORBIT_PERIOD = 16, ORBIT_ELEV = 8 * Math.PI / 180;
+  let orbitT = 0;
+  let orbiting = document.documentElement.dataset.orbit === "1" && !Q.has("az") && !Q.has("elev") && !Q.has("zoom") && !Q.has("testcam");
+  const stopOrbit = () => {
+    orbiting = false;
+  };
   const fpsWin = [];
   const testIdx = Q.has("testcam") ? Number(Q.get("testcam")) : -1;
   const currentCam = () => {
@@ -4523,6 +4644,12 @@ async function main() {
     if (!rafOn) return;
     const dt = lastNow ? (now - lastNow) / 1e3 : 0;
     lastNow = now;
+    if (orbiting) {
+      orbitT += Math.min(dt, 0.1);
+      const ph = 2 * Math.PI * orbitT / ORBIT_PERIOD;
+      az = ph;
+      elev = elev0 + ORBIT_ELEV * Math.sin(ph / 2);
+    }
     let { seq, t } = locate(playFrames);
     housekeeping(seq);
     const g = ensureGpu(seq);
@@ -4556,7 +4683,8 @@ async function main() {
     camViz.resize(canvas.clientWidth, canvas.clientHeight, canvas.width, canvas.height);
     camViz.setSceneKey(sceneName);
     if (camViz.enabled) {
-      camViz.draw(currentCam(), scene.testcams);
+      const oc = scene.orbit.center;
+      camViz.draw(currentCam(), scene.testcams, { center: [oc[0], oc[1], oc[2]], radius: 0.45, halfHeight: 0.95 });
       if (g) void bakeThumb(g, t);
     } else {
       camViz.draw(currentCam(), []);
@@ -4568,6 +4696,7 @@ async function main() {
   requestAnimationFrame(tick);
   let drag = null;
   canvas.addEventListener("pointerdown", (e) => {
+    stopOrbit();
     drag = { x: e.clientX, y: e.clientY };
     canvas.setPointerCapture(e.pointerId);
   });
@@ -4581,6 +4710,7 @@ async function main() {
     drag = { x: e.clientX, y: e.clientY };
   });
   canvas.addEventListener("wheel", (e) => {
+    stopOrbit();
     distScale *= Math.exp(e.deltaY * 1e-3);
     e.preventDefault();
   }, { passive: false });
@@ -4774,6 +4904,7 @@ async function main() {
           placed = null;
           xrFrames = 0;
           xrDrawError = false;
+          stopOrbit();
           rafOn = false;
           lastNow = 0;
           xr = stage;
@@ -4835,6 +4966,7 @@ async function main() {
       canvas: [canvas.width, canvas.height]
     }),
     setView: (o) => {
+      if (o.az !== void 0 || o.elev !== void 0 || o.zoom !== void 0) stopOrbit();
       if (o.az !== void 0) az = o.az * Math.PI / 180;
       if (o.elev !== void 0) elev = o.elev * Math.PI / 180;
       if (o.zoom !== void 0) distScale = o.zoom;
@@ -4905,7 +5037,7 @@ async function main() {
         id.data[i * 4 + 3] = 255;
       }
       c2.getContext("2d").putImageData(id, 0, 0);
-      document.body.insertBefore(c2, document.getElementById("hud"));
+      document.body.appendChild(c2);
       return { w: img.w, h: img.h };
     },
     /** render a test camera at frame t into the float target and return 8-bit RGB (base64). */
