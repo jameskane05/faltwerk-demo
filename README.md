@@ -13,7 +13,7 @@ This repo is a convenience slice that shows how to isolate playback outside the 
 
 ## Live
 
-- https://jameskane05.github.io/4dgs-holograms/
+- https://jameskane05.github.io/faltwerk-demo/
 
 Quest Browser is detected automatically and uses the MR profile. `?quest=1` forces that profile; `?quest=0` forces the desktop one.
 
