@@ -516,6 +516,8 @@ ${GRADE_WGSL}
 struct BlitU { bg: vec4f, grade: Grade };
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var<uniform> U: BlitU;
+// Planar floor shadow (max-blended discs); a=0 when shadows are off (1\xD71 stub).
+@group(0) @binding(2) var shadow: texture_2d<f32>;
 @vertex
 fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
   let p = vec2f(f32((vi << 1u) & 2u), f32(vi & 2u));
@@ -524,7 +526,12 @@ fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
 @fragment
 fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
   let c = textureLoad(src, vec2i(p.xy), 0);
-  return vec4f(clamp(graded(c, U.grade) + (1.0 - clamp(c.a, 0.0, 1.0)) * U.bg.rgb, vec3f(0.0), vec3f(1.0)), 1.0);
+  let shSize = vec2i(textureDimensions(shadow));
+  let sp = min(vec2i(p.xy), shSize - vec2i(1));
+  let sa = clamp(textureLoad(shadow, sp, 0).a, 0.0, 1.0);
+  let hole = 1.0 - clamp(c.a, 0.0, 1.0);
+  // Darken only the background term so the person stays clean.
+  return vec4f(clamp(graded(c, U.grade) + hole * (1.0 - sa) * U.bg.rgb, vec3f(0.0), vec3f(1.0)), 1.0);
 }
 `
 );
@@ -538,6 +545,7 @@ ${GRADE_WGSL}
 struct BlitU { origin: vec2f, flags: vec2f, grade: Grade, hud: vec4f, rs: vec4f }; // flags.x keepAlpha, flags.y encodeSrgb
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var<uniform> U: BlitU;
+@group(0) @binding(2) var shadow: texture_2d<f32>;
 
 fn lin2srgb(c: vec3f) -> vec3f {
   let lo = c * 12.92;
@@ -601,7 +609,12 @@ fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
     hdims = vec2f(dims) / U.rs.xy;
   }
   var rgb = graded(c, U.grade);
-  var a = select(1.0, clamp(c.a, 0.0, 1.0), U.flags.x > 0.5);
+  let shSize = vec2i(textureDimensions(shadow));
+  let sp = min(texel, shSize - vec2i(1));
+  let sa = clamp(textureLoad(shadow, sp, 0).a, 0.0, 1.0);
+  // keepAlpha: raise coverage with the floor shadow so passthrough darkens under the person.
+  var a = select(1.0, clamp(c.a, 0.0, 1.0) + (1.0 - clamp(c.a, 0.0, 1.0)) * sa, U.flags.x > 0.5);
+  if (U.flags.x < 0.5) { rgb = rgb + (1.0 - clamp(c.a, 0.0, 1.0)) * (1.0 - sa) * vec3f(0.0); }
   if (U.hud.z > 0.5) {
     let h = hudAt(vec2f(texel), hdims);
     if (h > 0u) {
@@ -1041,10 +1054,13 @@ var Renderer = class {
   shadowSoft = 0.55;
   shadowStride = 1;
   /** Direction toward the light (content space). */
-  shadowLight = [0.35, 1, 0.25];
+  shadowLight = [0.55, 1, 0.35];
   shadowScratch = new ArrayBuffer(48);
   shadowF = new Float32Array(this.shadowScratch);
   shadowI = new Uint32Array(this.shadowScratch);
+  /** Max-blended shadow discs; sampled by the blit so only the bg/passthrough hole darkens. */
+  shadowTarget = null;
+  shadowOffTex;
   sortU = null;
   sortSteps = [];
   cap = 0;
@@ -1085,7 +1101,7 @@ var Renderer = class {
   camI = new Uint32Array(this.camScratch);
   indirectReset = new Uint32Array([4, 0, 0, 0]);
   views = /* @__PURE__ */ new WeakMap();
-  blitBGs = /* @__PURE__ */ new WeakMap();
+  blitBGs = /* @__PURE__ */ new Map();
   occLayout;
   occFloat;
   occUint;
@@ -1135,22 +1151,19 @@ var Renderer = class {
       { binding: 1, visibility: V, buffer: { type: "read-only-storage" } },
       { binding: 2, visibility: V | F, buffer: { type: "uniform" } }
     ] });
+    const shadowBlend = { srcFactor: "one", dstFactor: "one", operation: "max" };
     this.shadowPipe = device.createRenderPipeline({
       layout: device.createPipelineLayout({ bindGroupLayouts: [shadowBGL, this.occLayout] }),
       vertex: { module: smSh, entryPoint: "vs" },
-      fragment: {
-        module: smSh,
-        entryPoint: "fs",
-        targets: [{
-          format: "rgba16float",
-          blend: {
-            color: { srcFactor: "zero", dstFactor: "one", operation: "add" },
-            alpha: { srcFactor: "one", dstFactor: "one", operation: "max" }
-          }
-        }]
-      },
+      fragment: { module: smSh, entryPoint: "fs", targets: [{ format: "rgba16float", blend: { color: shadowBlend, alpha: shadowBlend } }] },
       primitive: { topology: "triangle-strip" }
     });
+    this.shadowOffTex = device.createTexture({
+      size: [1, 1],
+      format: "rgba16float",
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT
+    });
+    device.queue.writeTexture({ texture: this.shadowOffTex }, new Uint16Array(4), { bytesPerRow: 8 }, [1, 1]);
     const bm = mod(BLIT_WGSL);
     this.blitPipe = device.createRenderPipeline({
       layout: "auto",
@@ -1220,7 +1233,8 @@ var Renderer = class {
     bp.setPipeline(pipe);
     bp.setBindGroup(0, dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [
       { binding: 0, resource: src.createView() },
-      { binding: 1, resource: { buffer: uni } }
+      { binding: 1, resource: { buffer: uni } },
+      { binding: 2, resource: this.shadowOffTex.createView() }
     ] }));
     bp.draw(3);
     bp.end();
@@ -1432,9 +1446,25 @@ var Renderer = class {
   ensureTarget(w, h) {
     if (this.target && this.targetSize[0] === w && this.targetSize[1] === h) return;
     this.target?.destroy();
-    this.target = this.device.createTexture({ size: [w, h], format: "rgba16float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC });
+    this.target = this.device.createTexture({
+      size: [w, h],
+      format: "rgba16float",
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC
+    });
     this.targetSize = [w, h];
+    this.ensureShadowTarget(w, h);
     this.peakBytes = Math.max(this.peakBytes, this.gpuBytes());
+  }
+  ensureShadowTarget(w, h) {
+    if (this.shadowTarget && this.shadowTarget.width === w && this.shadowTarget.height === h) return;
+    this.shadowTarget?.destroy();
+    this.blitBGs.clear();
+    this.shadowTarget = this.device.createTexture({
+      size: [Math.max(1, w), Math.max(1, h)],
+      format: "rgba16float",
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+      label: "floor-shadow"
+    });
   }
   /** encode one frame at global frame time t (fractional) into `out` (canvas texture) and submit.
    *  opts.diff: show |render − ref| (difference view) instead of the render. */
@@ -1634,6 +1664,8 @@ var Renderer = class {
     rp.drawIndirect(this.indirect, 0);
     rp.end();
     if (this.shadow) {
+      this.ensureShadowTarget(target.width, target.height);
+      const shTex = this.shadowTarget ?? this.shadowOffTex;
       const L = this.shadowLight;
       const len = Math.hypot(L[0], L[1], L[2]) || 1;
       const sf = this.shadowF, si = this.shadowI;
@@ -1651,7 +1683,12 @@ var Renderer = class {
       si[11] = 0;
       dev.queue.writeBuffer(this.shadowU, 0, this.shadowScratch);
       const sp = enc.beginRenderPass({
-        colorAttachments: [{ view: targetView, loadOp: "load", storeOp: "store" }]
+        colorAttachments: [{
+          view: this.viewOf(shTex),
+          clearValue: { r: 0, g: 0, b: 0, a: 0 },
+          loadOp: "clear",
+          storeOp: "store"
+        }]
       });
       sp.setPipeline(this.shadowPipe);
       sp.setBindGroup(0, bgs.shadow);
@@ -1726,12 +1763,16 @@ var Renderer = class {
     return v;
   }
   blitBindGroup(pipe, src, uni) {
+    const sh = this.shadow && this.shadowTarget ? this.shadowTarget : this.shadowOffTex;
     const hit = this.blitBGs.get(src);
-    if (hit && hit.pipe === pipe) return hit.bg;
-    const entries = [{ binding: 0, resource: this.viewOf(src) }];
+    if (hit && hit.pipe === pipe && hit.sh === sh) return hit.bg;
+    const entries = [
+      { binding: 0, resource: this.viewOf(src) },
+      { binding: 2, resource: this.viewOf(sh) }
+    ];
     if (uni) entries.push({ binding: 1, resource: { buffer: uni } });
     const bg = this.device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries });
-    this.blitBGs.set(src, { pipe, bg });
+    this.blitBGs.set(src, { pipe, bg, sh });
     return bg;
   }
   /** float render target -> 8-bit RGB (same clamp as the blit), for PSNR checks. */
@@ -3830,8 +3871,9 @@ async function main() {
   renderer.shadowFloorY = Number(Q.get("floory") ?? 0);
   const storedFade = Number(setting("shadowfade"));
   renderer.shadowFadeH = Number(Q.get("shadowfade") ?? (Number.isFinite(storedFade) ? storedFade : 1.8));
-  renderer.shadowMaxRad = qnum("shadowrad", 0.22, 0.2);
-  renderer.shadowSoft = qnum("shadowsoft", 0.7, 0.7);
+  renderer.shadowMaxRad = qnum("shadowrad", 0.35, 0.32);
+  renderer.shadowSoft = qnum("shadowsoft", 0.85, 0.8);
+  renderer.shadowLight = [0.55, 1, 0.35];
   const bgInput = document.getElementById("bg");
   const setBg = (hex) => {
     const m = /^#?([0-9a-f]{6})$/i.exec(hex);
