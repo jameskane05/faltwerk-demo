@@ -9,7 +9,7 @@ This repo is a convenience slice that shows how to isolate playback outside the 
 ## Authors
 
 - **James Kane** ([jameskane05](https://github.com/jameskane05))
-- **Aaron** ([edrethardo](https://github.com/edrethardo))
+- **Aaron Nowak** ([edrethardo](https://github.com/edrethardo))
 
 ## Live
 

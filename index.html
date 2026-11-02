@@ -227,22 +227,21 @@
   }
 </style>
 </head>
-<body>
+<body class="is-playing">
 <canvas id="c"></canvas>
 
-<section id="intro" aria-label="About this demo">
+<section id="intro" class="is-gone" aria-label="About this demo" hidden>
   <h1 class="brand">4DGS Holograms</h1>
   <p class="lede">
-    A playback-only WebGPU / WebXR demo of
+    A WebGPU / WebXR demo of
     <a href="https://github.com/edrethardo/Faltwerk">Faltwerk</a>
-    (CurveStream-GS). Isolates decoder + clips outside the training and encoding pipeline.
   </p>
   <div class="authors">
-    <div><span>Authors</span><br><strong>James Kane</strong> · <strong>Aaron</strong></div>
+    <div><span>Authors</span><br><strong>James Kane</strong> · <strong>Aaron Nowak</strong></div>
     <div><span>Codec</span><br><strong>Faltwerk</strong></div>
   </div>
   <div class="actions">
-    <button type="button" class="btn-primary" id="enter">Enter viewer</button>
+    <button type="button" class="btn-primary" id="enter">Back to viewer</button>
     <a class="btn-ghost" id="quest-link" href="?quest=1">Quest 3 MR</a>
     <a class="btn-ghost" href="https://github.com/edrethardo/Faltwerk" target="_blank" rel="noopener">Main repo</a>
   </div>
@@ -278,23 +277,19 @@
 
 <aside id="credit">
   <p class="mark">4DGS Holograms</p>
-  <p>James Kane · Aaron · playback demo for <a href="https://github.com/edrethardo/Faltwerk" target="_blank" rel="noopener">Faltwerk</a></p>
+  <p>James Kane · Aaron Nowak · <a href="https://github.com/edrethardo/Faltwerk" target="_blank" rel="noopener">Faltwerk</a></p>
   <button type="button" id="about-btn">About</button>
 </aside>
 
 <script>
   const intro = document.getElementById('intro');
-  const enter = () => {
-    intro.classList.add('is-gone');
-    document.body.classList.add('is-playing');
+  const showAbout = (on) => {
+    intro.hidden = !on;
+    intro.classList.toggle('is-gone', !on);
+    document.body.classList.toggle('is-playing', !on);
   };
-  document.getElementById('enter').addEventListener('click', enter);
-  document.getElementById('about-btn').addEventListener('click', () => {
-    intro.classList.remove('is-gone');
-    document.body.classList.remove('is-playing');
-  });
-  // Quest deep-link skips the gate so MR can start immediately.
-  if (new URLSearchParams(location.search).has('quest')) enter();
+  document.getElementById('enter').addEventListener('click', () => showAbout(false));
+  document.getElementById('about-btn').addEventListener('click', () => showAbout(true));
   const quest = document.getElementById('quest-link');
   quest.href = location.pathname.replace(/\/?$/, '/') + '?quest=1';
 </script>
