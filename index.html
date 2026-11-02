@@ -3,27 +3,301 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="Faltwerk playback demo — stream 4D Gaussian holograms in the browser and on Quest 3.">
 <title>4DGS Holograms</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Syne:wght@500;700;800&display=swap" rel="stylesheet">
 <style>
-  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font: 13px/1.3 system-ui, sans-serif; }
-  #c { width: 100vw; height: 100vh; display: block; touch-action: none; }
-  #hud { position: fixed; left: 8px; top: 8px; right: 8px; color: #cfd; text-shadow: 0 0 3px #000; pointer-events: none; }
-  #hud button, #hud label, #hud select { pointer-events: auto; margin-right: 6px; }
-  #hud input[type=color] { width: 28px; height: 18px; padding: 0; border: 0; vertical-align: middle; background: none; }
-  #recolor-info { margin-right: 6px; opacity: 0.8; }
-  #grade-box { display: inline-block; position: relative; pointer-events: auto; margin-right: 6px; }
-  #grade-box summary { cursor: pointer; }
-  #grade-panel { position: absolute; left: 0; top: 100%; z-index: 1; white-space: nowrap; background: rgba(0, 0, 0, 0.6); padding: 6px 8px; border-radius: 4px; margin-top: 4px; }
-  #grade-rows { display: grid; grid-template-columns: auto; gap: 2px; margin-top: 4px; }
-  #grade-rows label { display: grid; grid-template-columns: 80px 140px 56px; align-items: center; gap: 6px; margin: 0; }
-  #grade-rows input[type=number] { width: 52px; background: #111; color: #cfd; border: 1px solid #344; }
-  #stats { white-space: pre-wrap; }
-  #xr-hint { color: #fd8; margin-top: 4px; max-width: 60em; }
+  :root {
+    --ink: #e8e4dc;
+    --mute: #9a958c;
+    --line: rgba(232, 228, 220, 0.14);
+    --panel: rgba(12, 14, 16, 0.72);
+    --accent: #c8f135;
+    --accent-ink: #12140e;
+    --danger: #ffb454;
+    --font-display: "Syne", sans-serif;
+    --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #070809; color: var(--ink); overflow: hidden; }
+  body { font: 13px/1.45 var(--font-mono); }
+
+  #c {
+    position: fixed; inset: 0;
+    width: 100vw; height: 100vh;
+    display: block; touch-action: none;
+    background:
+      radial-gradient(120% 80% at 70% 10%, rgba(200, 241, 53, 0.05), transparent 50%),
+      radial-gradient(90% 70% at 10% 90%, rgba(80, 120, 140, 0.12), transparent 45%),
+      #070809;
+  }
+
+  #intro {
+    position: fixed; inset: 0; z-index: 20;
+    display: grid;
+    align-content: end;
+    padding: clamp(1.25rem, 4vw, 3rem);
+    padding-bottom: max(2rem, env(safe-area-inset-bottom));
+    background:
+      linear-gradient(180deg, rgba(7, 8, 9, 0.15) 0%, rgba(7, 8, 9, 0.55) 45%, rgba(7, 8, 9, 0.92) 100%);
+    pointer-events: auto;
+    transition: opacity 420ms ease, visibility 420ms ease;
+  }
+  #intro.is-gone { opacity: 0; visibility: hidden; pointer-events: none; }
+
+  .brand {
+    font-family: var(--font-display);
+    font-weight: 800;
+    font-size: clamp(2.6rem, 9vw, 5.5rem);
+    letter-spacing: -0.04em;
+    line-height: 0.92;
+    margin: 0 0 0.85rem;
+    max-width: 11ch;
+    animation: rise 700ms cubic-bezier(.2,.8,.2,1) both;
+  }
+  .lede {
+    max-width: 34rem;
+    margin: 0 0 1.4rem;
+    color: var(--mute);
+    font-size: clamp(0.92rem, 2.2vw, 1.05rem);
+    animation: rise 700ms cubic-bezier(.2,.8,.2,1) 80ms both;
+  }
+  .lede a { color: var(--ink); text-decoration: underline; text-underline-offset: 0.18em; }
+  .lede a:hover { color: var(--accent); }
+
+  .authors {
+    display: flex; flex-wrap: wrap; gap: 0.55rem 1.25rem;
+    margin: 0 0 1.6rem;
+    animation: rise 700ms cubic-bezier(.2,.8,.2,1) 140ms both;
+  }
+  .authors span { color: var(--mute); }
+  .authors strong { color: var(--ink); font-weight: 500; }
+
+  .actions {
+    display: flex; flex-wrap: wrap; gap: 0.7rem;
+    animation: rise 700ms cubic-bezier(.2,.8,.2,1) 200ms both;
+  }
+  .actions a, .actions button {
+    appearance: none; border: 0; cursor: pointer;
+    font: 500 0.85rem/1 var(--font-mono);
+    letter-spacing: 0.02em;
+    padding: 0.85rem 1.15rem;
+    text-decoration: none;
+    transition: transform 160ms ease, background 160ms ease, color 160ms ease;
+  }
+  .actions a:active, .actions button:active { transform: translateY(1px); }
+  .btn-primary { background: var(--accent); color: var(--accent-ink); }
+  .btn-primary:hover { filter: brightness(1.05); }
+  .btn-ghost {
+    background: transparent; color: var(--ink);
+    outline: 1px solid var(--line);
+  }
+  .btn-ghost:hover { outline-color: var(--ink); }
+
+  #hud {
+    position: fixed; left: 0; right: 0; top: 0; z-index: 5;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem 0.65rem;
+    padding: 0.65rem 0.8rem;
+    padding-top: max(0.65rem, env(safe-area-inset-top));
+    background: linear-gradient(180deg, rgba(7, 8, 9, 0.78), rgba(7, 8, 9, 0));
+    color: var(--ink);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 360ms ease 120ms;
+  }
+  body.is-playing #hud { opacity: 1; }
+  #hud button, #hud label, #hud select, #hud summary, #hud a, #hud input {
+    pointer-events: auto;
+  }
+  #hud button, #hud select, #grade-box summary {
+    appearance: none;
+    background: var(--panel);
+    color: var(--ink);
+    border: 1px solid var(--line);
+    border-radius: 0;
+    font: 500 12px/1.2 var(--font-mono);
+    padding: 0.45rem 0.65rem;
+    cursor: pointer;
+  }
+  #hud button:hover, #grade-box summary:hover { border-color: rgba(232, 228, 220, 0.35); }
+  #hud label { display: inline-flex; align-items: center; gap: 0.35rem; color: var(--mute); }
+  #hud input[type=color] {
+    width: 1.5rem; height: 1.1rem; padding: 0; border: 1px solid var(--line);
+    background: transparent; vertical-align: middle;
+  }
+  #hud input[type=checkbox] { accent-color: var(--accent); }
+  #recolor-info { color: var(--mute); }
+  #grade-box { position: relative; }
+  #grade-box summary { list-style: none; }
+  #grade-box summary::-webkit-details-marker { display: none; }
+  #grade-panel {
+    position: absolute; left: 0; top: calc(100% + 0.35rem); z-index: 2;
+    white-space: nowrap;
+    background: rgba(10, 12, 14, 0.92);
+    border: 1px solid var(--line);
+    padding: 0.65rem 0.75rem;
+    backdrop-filter: blur(8px);
+  }
+  #grade-rows { display: grid; gap: 0.2rem; margin-top: 0.45rem; }
+  #grade-rows label {
+    display: grid; grid-template-columns: 5.2rem 9rem 3.6rem;
+    align-items: center; gap: 0.4rem; margin: 0; color: var(--ink);
+  }
+  #grade-rows input[type=number] {
+    width: 3.4rem; background: #111; color: var(--ink); border: 1px solid var(--line);
+    font: 12px var(--font-mono); padding: 0.2rem 0.3rem;
+  }
+  #stats {
+    white-space: pre-wrap;
+    color: var(--mute);
+    font-size: 11px;
+    margin-left: auto;
+    max-width: min(42vw, 28rem);
+  }
+  #xr-hint {
+    flex-basis: 100%;
+    color: var(--danger);
+    margin-top: 0.15rem;
+    max-width: 56rem;
+  }
+  #xr-ar {
+    background: var(--accent) !important;
+    color: var(--accent-ink) !important;
+    border-color: transparent !important;
+    font-weight: 700 !important;
+  }
+
+  #credit {
+    position: fixed;
+    left: 0.85rem;
+    bottom: max(0.75rem, env(safe-area-inset-bottom));
+    z-index: 6;
+    max-width: min(28rem, calc(100vw - 1.5rem));
+    pointer-events: none;
+    opacity: 0;
+    transform: translateY(6px);
+    transition: opacity 400ms ease 180ms, transform 400ms ease 180ms;
+  }
+  body.is-playing #credit {
+    opacity: 1;
+    transform: none;
+    pointer-events: auto;
+  }
+  #credit .mark {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 0.95rem;
+    letter-spacing: -0.02em;
+    margin: 0 0 0.2rem;
+  }
+  #credit p {
+    margin: 0;
+    color: var(--mute);
+    font-size: 11px;
+    line-height: 1.4;
+    text-shadow: 0 1px 8px #000;
+  }
+  #credit a { color: var(--ink); text-underline-offset: 0.15em; }
+  #credit a:hover { color: var(--accent); }
+  #about-btn {
+    margin-top: 0.45rem;
+    appearance: none;
+    background: transparent;
+    border: 0;
+    color: var(--mute);
+    font: 11px var(--font-mono);
+    padding: 0;
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 0.15em;
+  }
+  #about-btn:hover { color: var(--accent); }
+
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(14px); }
+    to { opacity: 1; transform: none; }
+  }
+
+  @media (max-width: 640px) {
+    #stats { display: none; }
+    .brand { max-width: 9ch; }
+  }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
-<div id="hud"><button id="play" type="button">▶/❚❚</button><button id="hold" type="button" data-de="Anhalten">Hold</button><select id="scene" hidden></select><label><span data-de="Hintergrund">Background</span> <input id="bg" type="color" value="#000000"></label><label id="occ-box" hidden><input id="occ" type="checkbox" checked><span data-de="Hände verdecken">Hands occlude</span></label><label id="occ-debug-box" hidden><input id="occ-debug" type="checkbox"><span data-de="Verdeckung rot zeigen">Show occlusion in red</span></label><details id="grade-box" hidden><summary data-de="Farbe">Colour</summary><div id="grade-panel"><div><label title="Estimate a grade from the headset's room camera when MR starts; moving any slider switches back to manual" data-de-title="Schätzt beim MR-Start eine Farbkorrektur aus der Raumkamera; jeder Regler schaltet zurück auf manuell"><input id="recolor" type="checkbox"><span data-de="Auto aus Raum">Auto from room</span></label><label id="desk-box" hidden title="Pinchable slider desk next to you in MR; pinch its tray to carry it" data-de-title="Greifbares Reglerpult neben dir in MR; am Brett greifen, um es zu tragen"><input id="desk" type="checkbox" checked><span data-de="Pult in MR">Desk in MR</span></label><button id="grade-reset" type="button" data-de="Zurücksetzen">Reset</button></div><div id="grade-rows"></div></div></details><span id="recolor-info"></span><button id="xr-ar" type="button" hidden>MR</button><span id="stats" data-de="lade …">loading …</span><div id="xr-hint" hidden></div></div>
+
+<section id="intro" aria-label="About this demo">
+  <h1 class="brand">4DGS Holograms</h1>
+  <p class="lede">
+    A playback-only WebGPU / WebXR demo of
+    <a href="https://github.com/edrethardo/Faltwerk">Faltwerk</a>
+    (CurveStream-GS). Isolates decoder + clips outside the training and encoding pipeline.
+  </p>
+  <div class="authors">
+    <div><span>Authors</span><br><strong>James Kane</strong> · <strong>Aaron</strong></div>
+    <div><span>Codec</span><br><strong>Faltwerk</strong></div>
+  </div>
+  <div class="actions">
+    <button type="button" class="btn-primary" id="enter">Enter viewer</button>
+    <a class="btn-ghost" id="quest-link" href="?quest=1">Quest 3 MR</a>
+    <a class="btn-ghost" href="https://github.com/edrethardo/Faltwerk" target="_blank" rel="noopener">Main repo</a>
+  </div>
+</section>
+
+<div id="hud">
+  <button id="play" type="button">▶/❚❚</button>
+  <button id="hold" type="button" data-de="Anhalten">Hold</button>
+  <select id="scene" hidden></select>
+  <label><span data-de="Hintergrund">Background</span> <input id="bg" type="color" value="#000000"></label>
+  <label id="occ-box" hidden><input id="occ" type="checkbox" checked><span data-de="Hände verdecken">Hands occlude</span></label>
+  <label id="occ-debug-box" hidden><input id="occ-debug" type="checkbox"><span data-de="Verdeckung rot zeigen">Show occlusion in red</span></label>
+  <details id="grade-box" hidden>
+    <summary data-de="Farbe">Colour</summary>
+    <div id="grade-panel">
+      <div>
+        <label title="Estimate a grade from the headset's room camera when MR starts; moving any slider switches back to manual" data-de-title="Schätzt beim MR-Start eine Farbkorrektur aus der Raumkamera; jeder Regler schaltet zurück auf manuell">
+          <input id="recolor" type="checkbox"><span data-de="Auto aus Raum">Auto from room</span>
+        </label>
+        <label id="desk-box" hidden title="Pinchable slider desk next to you in MR; pinch its tray to carry it" data-de-title="Greifbares Reglerpult neben dir in MR; am Brett greifen, um es zu tragen">
+          <input id="desk" type="checkbox" checked><span data-de="Pult in MR">Desk in MR</span>
+        </label>
+        <button id="grade-reset" type="button" data-de="Zurücksetzen">Reset</button>
+      </div>
+      <div id="grade-rows"></div>
+    </div>
+  </details>
+  <span id="recolor-info"></span>
+  <button id="xr-ar" type="button" hidden>MR</button>
+  <span id="stats" data-de="lade …">loading …</span>
+  <div id="xr-hint" hidden></div>
+</div>
+
+<aside id="credit">
+  <p class="mark">4DGS Holograms</p>
+  <p>James Kane · Aaron · playback demo for <a href="https://github.com/edrethardo/Faltwerk" target="_blank" rel="noopener">Faltwerk</a></p>
+  <button type="button" id="about-btn">About</button>
+</aside>
+
+<script>
+  const intro = document.getElementById('intro');
+  const enter = () => {
+    intro.classList.add('is-gone');
+    document.body.classList.add('is-playing');
+  };
+  document.getElementById('enter').addEventListener('click', enter);
+  document.getElementById('about-btn').addEventListener('click', () => {
+    intro.classList.remove('is-gone');
+    document.body.classList.remove('is-playing');
+  });
+  // Quest deep-link skips the gate so MR can start immediately.
+  if (new URLSearchParams(location.search).has('quest')) enter();
+  const quest = document.getElementById('quest-link');
+  quest.href = location.pathname.replace(/\/?$/, '/') + '?quest=1';
+</script>
 <script type="module" src="./main.js"></script>
 </body>
 </html>
