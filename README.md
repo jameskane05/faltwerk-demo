@@ -1,4 +1,4 @@
-# 4DGS Holograms
+# 4DGS Compression
 
 Playback-only WebGPU / WebXR demo for **[Faltwerk](https://github.com/edrethardo/Faltwerk)** (CurveStream-GS): decoder, four P44 clips, and the MR player (carousel, world-space colour desk, planar floor shadow, hand occluders).
 

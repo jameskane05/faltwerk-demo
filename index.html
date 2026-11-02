@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="description" content="A WebGPU / WebXR demo of Faltwerk.">
-<title>4DGS Holograms</title>
+<title>4DGS Compression</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Syne:wght@500;700;800&display=swap" rel="stylesheet">
@@ -73,11 +73,12 @@
 
   .authors {
     display: flex; flex-wrap: wrap; gap: 0.85rem 1.5rem;
-    margin: 0 0 1.6rem;
+    margin: 0 0 0.85rem;
     text-shadow: 0 1px 12px rgba(0, 0, 0, 0.55);
   }
+  .authors-rate { margin: 0 0 1.6rem; }
   .authors span { color: var(--mute); }
-  .authors strong { color: var(--ink); font-weight: 500; }
+  .authors strong { color: var(--ink); font-weight: 500; font-variant-numeric: tabular-nums; }
   .authors a { color: var(--ink); font-weight: 500; text-decoration: underline; text-underline-offset: 0.18em; }
   .authors a:hover { color: var(--accent); }
 
@@ -230,7 +231,7 @@
 
 <section id="intro" aria-label="About this demo">
   <div class="hit intro-top">
-    <h1 class="brand">4DGS Holograms</h1>
+    <h1 class="brand">4DGS Compression</h1>
     <p class="lede">
       A WebGPU / WebXR demo of
       <a href="https://github.com/edrethardo/Faltwerk">Faltwerk</a>
@@ -242,6 +243,9 @@
       <div><span>Codec</span><br><a href="https://github.com/edrethardo/Faltwerk" target="_blank" rel="noopener"><strong>Faltwerk</strong></a></div>
       <div><span>Capture</span><br><strong>iPhone Air</strong></div>
       <div><span>Processing</span><br><a href="https://github.com/ant-research/4DAnyone" target="_blank" rel="noopener"><strong>4DAnyone</strong></a></div>
+    </div>
+    <div class="authors authors-rate">
+      <div><span>Bitrate</span><br><strong id="bitrate">…</strong></div>
     </div>
     <div class="actions">
       <button type="button" class="btn-primary" id="enter">Enter viewer</button>
@@ -280,30 +284,80 @@
 </div>
 
 <aside id="credit">
-  <p class="mark">4DGS Holograms</p>
+  <p class="mark">4DGS Compression</p>
   <p>Aaron Nowak · James Kane · <a href="https://github.com/edrethardo/Faltwerk" target="_blank" rel="noopener">Faltwerk</a></p>
   <button type="button" id="about-btn">About</button>
 </aside>
 
 <script>
   const intro = document.getElementById('intro');
+  const bitrateEl = document.getElementById('bitrate');
   const showLanding = (on) => {
     intro.classList.toggle('is-gone', !on);
     document.body.classList.toggle('is-chrome-clear', !on);
   };
   document.getElementById('enter').addEventListener('click', () => showLanding(false));
   document.getElementById('about-btn').addEventListener('click', () => showLanding(true));
-  // Quest deep-link goes straight to controls.
   if (new URLSearchParams(location.search).has('quest')) showLanding(false);
   const questLink = document.getElementById('quest-link');
   questLink.href = location.pathname.replace(/\/?$/, '/') + '?quest=1';
-  // Landing + HUD MR only when immersive-ar is actually available.
-  const showMr = () => {
-    questLink.hidden = false;
-  };
   if (navigator.xr && navigator.xr.isSessionSupported) {
-    navigator.xr.isSessionSupported('immersive-ar').then((ok) => { if (ok) showMr(); }).catch(() => {});
+    navigator.xr.isSessionSupported('immersive-ar').then((ok) => { if (ok) questLink.hidden = false; }).catch(() => {});
   }
+
+  const sizeCache = new Map();
+  async function sectionBytes(url) {
+    if (sizeCache.has(url)) return sizeCache.get(url);
+    let n = 0;
+    try {
+      const head = await fetch(url, { method: 'HEAD', cache: 'force-cache' });
+      const len = Number(head.headers.get('content-length'));
+      if (Number.isFinite(len) && len > 0) n = len;
+    } catch {}
+    if (!n) {
+      try {
+        const r = await fetch(url, { cache: 'force-cache' });
+        const buf = await r.arrayBuffer();
+        n = buf.byteLength;
+      } catch {}
+    }
+    sizeCache.set(url, n);
+    return n;
+  }
+
+  async function updateBitrate(sceneName) {
+    if (!sceneName || !bitrateEl) return;
+    bitrateEl.textContent = '…';
+    try {
+      const sc = await (await fetch(sceneName, { cache: 'no-store' })).json();
+      const secs = Array.isArray(sc.sections) ? sc.sections : [];
+      const fps = Number(sc.fps) || 30;
+      let frames = 0, bytes = 0;
+      for (const s of secs) {
+        frames += Number(s.nframes) || 0;
+        bytes += await sectionBytes(s.url);
+      }
+      const sec = frames > 0 && fps > 0 ? frames / fps : 0;
+      if (!bytes || !sec) { bitrateEl.textContent = '—'; return; }
+      const mbps = (bytes * 8) / sec / 1e6;
+      bitrateEl.textContent = mbps >= 10 ? mbps.toFixed(1) + ' Mbit/s' : mbps.toFixed(2) + ' Mbit/s';
+    } catch {
+      bitrateEl.textContent = '—';
+    }
+  }
+
+  const sceneSel = document.getElementById('scene');
+  const watchScene = () => {
+    if (sceneSel && sceneSel.value) updateBitrate(sceneSel.value);
+  };
+  sceneSel?.addEventListener('change', watchScene);
+  // Player fills the select asynchronously; poll briefly until it appears.
+  let tries = 0;
+  const boot = setInterval(() => {
+    tries++;
+    if (sceneSel && sceneSel.options.length) { watchScene(); clearInterval(boot); }
+    else if (tries > 80) clearInterval(boot);
+  }, 100);
 </script>
 <script>
   // Planar shadows only read on a light floor; don't keep a leftover black desktop bg.
