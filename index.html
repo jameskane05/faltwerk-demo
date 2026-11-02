@@ -32,7 +32,6 @@
     background: #070809;
   }
 
-  /* Transparent chrome over the live player — no scrim. */
   #intro {
     position: fixed; inset: 0; z-index: 20;
     display: flex;
@@ -43,12 +42,10 @@
     padding-bottom: max(2rem, env(safe-area-inset-bottom));
     background: transparent;
     pointer-events: none;
-    transition: opacity 420ms ease, visibility 420ms ease;
   }
-  #intro.is-gone { opacity: 0; visibility: hidden; pointer-events: none; }
   #intro .hit { pointer-events: auto; }
-  .intro-top { align-self: start; max-width: min(36rem, 100%); }
-  .intro-bottom { align-self: start; }
+  .intro-top { align-self: start; max-width: min(36rem, 100%); margin-top: 2.4rem; }
+  .intro-bottom { align-self: start; max-width: min(52rem, 100%); }
 
   .brand {
     font-family: var(--font-display);
@@ -71,36 +68,32 @@
   .lede a { color: var(--ink); text-decoration: underline; text-underline-offset: 0.18em; }
   .lede a:hover { color: var(--accent); }
 
-  .authors {
+  .meta, .perf {
     display: flex; flex-wrap: wrap; gap: 0.85rem 1.5rem;
-    margin: 0 0 0.85rem;
     text-shadow: 0 1px 12px rgba(0, 0, 0, 0.55);
   }
-  .authors-rate { margin: 0 0 1.6rem; }
-  .authors span { color: var(--mute); }
-  .authors strong { color: var(--ink); font-weight: 500; font-variant-numeric: tabular-nums; }
-  .authors a { color: var(--ink); font-weight: 500; text-decoration: underline; text-underline-offset: 0.18em; }
-  .authors a:hover { color: var(--accent); }
-
-  .actions {
-    display: flex; flex-wrap: wrap; gap: 0.7rem;
+  .meta { margin: 0 0 0.85rem; }
+  .perf { margin: 0 0 1.1rem; }
+  .meta span, .perf span { color: var(--mute); display: block; }
+  .meta strong, .perf strong {
+    color: var(--ink); font-weight: 500; font-variant-numeric: tabular-nums;
   }
-  .actions a, .actions button {
+  .meta a, .actions a {
+    color: var(--ink); font-weight: 500; text-decoration: underline; text-underline-offset: 0.18em;
+  }
+  .meta a:hover, .actions a:hover { color: var(--accent); }
+
+  .actions { display: flex; flex-wrap: wrap; gap: 0.7rem; align-items: center; }
+  .actions a {
     appearance: none; border: 0; cursor: pointer;
     font: 500 0.85rem/1 var(--font-mono);
     letter-spacing: 0.02em;
     padding: 0.85rem 1.15rem;
     text-decoration: none;
-    transition: transform 160ms ease, filter 160ms ease, outline-color 160ms ease;
-  }
-  .actions a:active, .actions button:active { transform: translateY(1px); }
-  .btn-primary { background: var(--accent); color: var(--accent-ink); }
-  .btn-primary:hover { filter: brightness(1.05); }
-  .btn-ghost {
     background: transparent; color: var(--ink);
     outline: 1px solid var(--line);
   }
-  .btn-ghost:hover { outline-color: var(--ink); }
+  .actions a:hover { outline-color: var(--ink); }
 
   #hud {
     position: fixed; left: 0; right: 0; top: 0; z-index: 5;
@@ -110,10 +103,7 @@
     background: linear-gradient(180deg, rgba(7, 8, 9, 0.78), rgba(7, 8, 9, 0));
     color: var(--ink);
     pointer-events: none;
-    opacity: 0;
-    transition: opacity 360ms ease;
   }
-  body.is-chrome-clear #hud { opacity: 1; }
   #hud button, #hud label, #hud select, #hud summary, #hud a, #hud input {
     pointer-events: auto;
   }
@@ -156,13 +146,8 @@
     width: 3.4rem; background: #111; color: var(--ink); border: 1px solid var(--line);
     font: 12px var(--font-mono); padding: 0.2rem 0.3rem;
   }
-  #stats {
-    white-space: pre-wrap;
-    color: var(--mute);
-    font-size: 11px;
-    margin-left: auto;
-    max-width: min(42vw, 28rem);
-  }
+  /* Player still writes here; we mirror into the bottom perf row. */
+  #stats { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   #xr-hint {
     flex-basis: 100%;
     color: var(--danger);
@@ -176,52 +161,7 @@
     font-weight: 700 !important;
   }
 
-  #credit {
-    position: fixed;
-    left: 0.85rem;
-    bottom: max(0.75rem, env(safe-area-inset-bottom));
-    z-index: 6;
-    max-width: min(28rem, calc(100vw - 1.5rem));
-    pointer-events: none;
-    opacity: 0;
-    transition: opacity 360ms ease;
-  }
-  body.is-chrome-clear #credit {
-    opacity: 1;
-    pointer-events: auto;
-  }
-  #credit .mark {
-    font-family: var(--font-display);
-    font-weight: 700;
-    font-size: 0.95rem;
-    letter-spacing: -0.02em;
-    margin: 0 0 0.2rem;
-  }
-  #credit p {
-    margin: 0;
-    color: var(--mute);
-    font-size: 11px;
-    line-height: 1.4;
-    text-shadow: 0 1px 8px #000;
-  }
-  #credit a { color: var(--ink); text-underline-offset: 0.15em; }
-  #credit a:hover { color: var(--accent); }
-  #about-btn {
-    margin-top: 0.45rem;
-    appearance: none;
-    background: transparent;
-    border: 0;
-    color: var(--mute);
-    font: 11px var(--font-mono);
-    padding: 0;
-    cursor: pointer;
-    text-decoration: underline;
-    text-underline-offset: 0.15em;
-  }
-  #about-btn:hover { color: var(--accent); }
-
   @media (max-width: 640px) {
-    #stats { display: none; }
     .brand { max-width: 9ch; }
   }
 </style>
@@ -238,19 +178,23 @@
     </p>
   </div>
   <div class="hit intro-bottom">
-    <div class="authors">
-      <div><span>Authors</span><br><strong>Aaron Nowak</strong> · <strong>James Kane</strong></div>
-      <div><span>Codec</span><br><a href="https://github.com/edrethardo/Faltwerk" target="_blank" rel="noopener"><strong>Faltwerk</strong></a></div>
-      <div><span>Capture</span><br><strong>iPhone Air</strong></div>
-      <div><span>Processing</span><br><a href="https://github.com/ant-research/4DAnyone" target="_blank" rel="noopener"><strong>4DAnyone</strong></a></div>
+    <div class="meta">
+      <div><span>Authors</span><strong>Aaron Nowak · James Kane</strong></div>
+      <div><span>Codec</span><a href="https://github.com/edrethardo/Faltwerk" target="_blank" rel="noopener"><strong>Faltwerk</strong></a></div>
+      <div><span>Capture</span><strong>iPhone Air</strong></div>
+      <div><span>Processing</span><a href="https://github.com/ant-research/4DAnyone" target="_blank" rel="noopener"><strong>4DAnyone</strong></a></div>
     </div>
-    <div class="authors authors-rate">
-      <div><span>Bitrate</span><br><strong id="bitrate">…</strong></div>
+    <div class="perf" aria-live="polite">
+      <div><span>FPS</span><strong id="stat-fps">…</strong></div>
+      <div><span>Time</span><strong id="stat-time">…</strong></div>
+      <div><span>Splats</span><strong id="stat-splats">…</strong></div>
+      <div><span>GPU</span><strong id="stat-gpu">…</strong></div>
+      <div><span>VRAM</span><strong id="stat-vram">…</strong></div>
+      <div><span>Bitrate</span><strong id="stat-mbps">…</strong></div>
     </div>
     <div class="actions">
-      <button type="button" class="btn-primary" id="enter">Enter viewer</button>
       <a class="btn-ghost" id="quest-link" href="?quest=1" hidden>Quest 3 MR</a>
-      <a class="btn-ghost" href="https://github.com/edrethardo/Faltwerk" target="_blank" rel="noopener">Main repo</a>
+      <a href="https://github.com/edrethardo/Faltwerk" target="_blank" rel="noopener">Main repo</a>
     </div>
   </div>
 </section>
@@ -283,22 +227,7 @@
   <div id="xr-hint" hidden></div>
 </div>
 
-<aside id="credit">
-  <p class="mark">4DGS Compression</p>
-  <p>Aaron Nowak · James Kane · <a href="https://github.com/edrethardo/Faltwerk" target="_blank" rel="noopener">Faltwerk</a></p>
-  <button type="button" id="about-btn">About</button>
-</aside>
-
 <script>
-  const intro = document.getElementById('intro');
-  const bitrateEl = document.getElementById('bitrate');
-  const showLanding = (on) => {
-    intro.classList.toggle('is-gone', !on);
-    document.body.classList.toggle('is-chrome-clear', !on);
-  };
-  document.getElementById('enter').addEventListener('click', () => showLanding(false));
-  document.getElementById('about-btn').addEventListener('click', () => showLanding(true));
-  if (new URLSearchParams(location.search).has('quest')) showLanding(false);
   const questLink = document.getElementById('quest-link');
   questLink.href = location.pathname.replace(/\/?$/, '/') + '?quest=1';
   if (navigator.xr && navigator.xr.isSessionSupported) {
@@ -306,6 +235,7 @@
   }
 
   const sizeCache = new Map();
+  const mbpsEl = document.getElementById('stat-mbps');
   async function sectionBytes(url) {
     if (sizeCache.has(url)) return sizeCache.get(url);
     let n = 0;
@@ -316,8 +246,7 @@
     } catch {}
     if (!n) {
       try {
-        const r = await fetch(url, { cache: 'force-cache' });
-        const buf = await r.arrayBuffer();
+        const buf = await (await fetch(url, { cache: 'force-cache' })).arrayBuffer();
         n = buf.byteLength;
       } catch {}
     }
@@ -326,8 +255,8 @@
   }
 
   async function updateBitrate(sceneName) {
-    if (!sceneName || !bitrateEl) return;
-    bitrateEl.textContent = '…';
+    if (!sceneName || !mbpsEl) return;
+    mbpsEl.textContent = '…';
     try {
       const sc = await (await fetch(sceneName, { cache: 'no-store' })).json();
       const secs = Array.isArray(sc.sections) ? sc.sections : [];
@@ -338,29 +267,58 @@
         bytes += await sectionBytes(s.url);
       }
       const sec = frames > 0 && fps > 0 ? frames / fps : 0;
-      if (!bytes || !sec) { bitrateEl.textContent = '—'; return; }
+      if (!bytes || !sec) { mbpsEl.textContent = '—'; return; }
       const mbps = (bytes * 8) / sec / 1e6;
-      bitrateEl.textContent = mbps >= 10 ? mbps.toFixed(1) + ' Mbit/s' : mbps.toFixed(2) + ' Mbit/s';
+      mbpsEl.textContent = (mbps >= 10 ? mbps.toFixed(1) : mbps.toFixed(2)) + ' Mbit/s';
     } catch {
-      bitrateEl.textContent = '—';
+      mbpsEl.textContent = '—';
     }
   }
 
   const sceneSel = document.getElementById('scene');
-  const watchScene = () => {
-    if (sceneSel && sceneSel.value) updateBitrate(sceneSel.value);
-  };
+  const watchScene = () => { if (sceneSel?.value) updateBitrate(sceneSel.value); };
   sceneSel?.addEventListener('change', watchScene);
-  // Player fills the select asynchronously; poll briefly until it appears.
   let tries = 0;
   const boot = setInterval(() => {
     tries++;
-    if (sceneSel && sceneSel.options.length) { watchScene(); clearInterval(boot); }
+    if (sceneSel?.options.length) { watchScene(); clearInterval(boot); }
     else if (tries > 80) clearInterval(boot);
   }, 100);
+
+  // Mirror player #stats → bottom perf row.
+  // Format: "… · 60 fps · section 0 t=12.34 · 135000 splats (12000 visible) · GPU 4.20 ms · 256 MiB"
+  const els = {
+    fps: document.getElementById('stat-fps'),
+    time: document.getElementById('stat-time'),
+    splats: document.getElementById('stat-splats'),
+    gpu: document.getElementById('stat-gpu'),
+    vram: document.getElementById('stat-vram'),
+  };
+  const statsNode = document.getElementById('stats');
+  const applyStats = (text) => {
+    if (!text || /lade|loading|Fehler|Error|GPU-Fehler/i.test(text)) return;
+    const fps = text.match(/(\d+)\s*fps/i);
+    const time = text.match(/\bt=([\d.]+)/i);
+    const splats = text.match(/([\d,]+)\s*splats/i);
+    const visible = text.match(/\(([\d,]+)\s*(?:sichtbar|visible)\)/i);
+    const gpu = text.match(/GPU\s+([\d.]+)\s*ms/i);
+    const vram = text.match(/([\d.]+)\s*MiB/i);
+    if (fps) els.fps.textContent = fps[1];
+    if (time) els.time.textContent = Number(time[1]).toFixed(2) + ' s';
+    if (splats) {
+      const n = splats[1].replace(/,/g, '');
+      els.splats.textContent = visible
+        ? `${Number(n).toLocaleString()} (${Number(visible[1].replace(/,/g, '')).toLocaleString()})`
+        : Number(n).toLocaleString();
+    }
+    if (gpu) els.gpu.textContent = Number(gpu[1]).toFixed(2) + ' ms';
+    if (vram) els.vram.textContent = vram[1] + ' MiB';
+  };
+  const mo = new MutationObserver(() => applyStats(statsNode.textContent || ''));
+  mo.observe(statsNode, { characterData: true, childList: true, subtree: true });
+  setInterval(() => applyStats(statsNode.textContent || ''), 250);
 </script>
 <script>
-  // Planar shadows only read on a light floor; don't keep a leftover black desktop bg.
   try {
     const k = 'p5.bg';
     const v = (localStorage.getItem(k) || '').toLowerCase();
