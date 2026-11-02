@@ -35,9 +35,11 @@
   /* Transparent chrome over the live player — no scrim. */
   #intro {
     position: fixed; inset: 0; z-index: 20;
-    display: grid;
-    align-content: end;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
     padding: clamp(1.25rem, 4vw, 3rem);
+    padding-top: max(clamp(1.25rem, 4vw, 3rem), env(safe-area-inset-top));
     padding-bottom: max(2rem, env(safe-area-inset-bottom));
     background: transparent;
     pointer-events: none;
@@ -45,6 +47,8 @@
   }
   #intro.is-gone { opacity: 0; visibility: hidden; pointer-events: none; }
   #intro .hit { pointer-events: auto; }
+  .intro-top { align-self: start; max-width: min(36rem, 100%); }
+  .intro-bottom { align-self: start; }
 
   .brand {
     font-family: var(--font-display);
@@ -59,7 +63,7 @@
   }
   .lede {
     max-width: 36rem;
-    margin: 0 0 1.4rem;
+    margin: 0;
     color: var(--mute);
     font-size: clamp(0.92rem, 2.2vw, 1.05rem);
     text-shadow: 0 1px 12px rgba(0, 0, 0, 0.55);
@@ -225,12 +229,14 @@
 <canvas id="c"></canvas>
 
 <section id="intro" aria-label="About this demo">
-  <div class="hit">
+  <div class="hit intro-top">
     <h1 class="brand">4DGS Holograms</h1>
     <p class="lede">
       A WebGPU / WebXR demo of
       <a href="https://github.com/edrethardo/Faltwerk">Faltwerk</a>
     </p>
+  </div>
+  <div class="hit intro-bottom">
     <div class="authors">
       <div><span>Authors</span><br><strong>Aaron Nowak</strong> · <strong>James Kane</strong></div>
       <div><span>Codec</span><br><a href="https://github.com/edrethardo/Faltwerk" target="_blank" rel="noopener"><strong>Faltwerk</strong></a></div>
@@ -239,7 +245,7 @@
     </div>
     <div class="actions">
       <button type="button" class="btn-primary" id="enter">Enter viewer</button>
-      <a class="btn-ghost" id="quest-link" href="?quest=1">Quest 3 MR</a>
+      <a class="btn-ghost" id="quest-link" href="?quest=1" hidden>Quest 3 MR</a>
       <a class="btn-ghost" href="https://github.com/edrethardo/Faltwerk" target="_blank" rel="noopener">Main repo</a>
     </div>
   </div>
@@ -289,7 +295,15 @@
   document.getElementById('about-btn').addEventListener('click', () => showLanding(true));
   // Quest deep-link goes straight to controls.
   if (new URLSearchParams(location.search).has('quest')) showLanding(false);
-  document.getElementById('quest-link').href = location.pathname.replace(/\/?$/, '/') + '?quest=1';
+  const questLink = document.getElementById('quest-link');
+  questLink.href = location.pathname.replace(/\/?$/, '/') + '?quest=1';
+  // Landing + HUD MR only when immersive-ar is actually available.
+  const showMr = () => {
+    questLink.hidden = false;
+  };
+  if (navigator.xr && navigator.xr.isSessionSupported) {
+    navigator.xr.isSessionSupported('immersive-ar').then((ok) => { if (ok) showMr(); }).catch(() => {});
+  }
 </script>
 <script>
   // Planar shadows only read on a light floor; don't keep a leftover black desktop bg.
