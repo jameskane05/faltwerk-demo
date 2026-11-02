@@ -617,10 +617,10 @@ fn shadowCov(p: vec2i) -> f32 {
 fn shadowBlur(p: vec2i) -> f32 {
   var a = 0.0;
   var wsum = 0.0;
-  for (var y = -4; y <= 4; y++) {
-    for (var x = -4; x <= 4; x++) {
+  for (var y = -2; y <= 2; y++) {
+    for (var x = -2; x <= 2; x++) {
       let w = 1.0 / (1.0 + f32(x * x + y * y) * 0.35);
-      a += w * shadowCov(p + vec2i(x, y) * 3);
+      a += w * shadowCov(p + vec2i(x, y) * 2);
       wsum += w;
     }
   }
@@ -3277,7 +3277,7 @@ var DeskGPU = class {
 };
 
 // src/xr.ts
-var OCC_MARGIN = 0.02;
+var OCC_MARGIN = 0.08;
 function mul42(a, b, out = new Float32Array(16)) {
   for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) {
     let s = 0;
@@ -5195,16 +5195,16 @@ async function main() {
     playing = !playing;
   });
   const xrScaleQ = qnum("xrscale", 1, 1);
-  const xrRenderScale = Math.min(1, Math.max(0.3, qnum("xrrs", 1, 1)));
+  const xrRenderScale = Math.min(1, Math.max(0.3, qnum("xrrs", 0.7, 1)));
   const xrLayerScale = Number.isFinite(xrScaleQ) && xrScaleQ > 0 ? xrScaleQ : 1;
   const xrFovQ = Q.get("foveation");
   const xrOpts = {
     foveation: xrFovQ !== null && Number.isFinite(Number(xrFovQ)) ? Math.min(1, Math.max(0, Number(xrFovQ))) : void 0,
     frameRate: qnum("hz", 72, 0) || void 0
   };
-  const hudOn = qnum("hud", 1, 0) > 0;
-  const xrDistQ = Number(Q.get("xrdist") ?? 1.5);
-  const xrDist = Number.isFinite(xrDistQ) && xrDistQ > 0 ? xrDistQ : 1.5;
+  const hudOn = qnum("hud", 0, 0) > 0;
+  const xrDistQ = Number(Q.get("xrdist") ?? 1.1);
+  const xrDist = Number.isFinite(xrDistQ) && xrDistQ > 0 ? xrDistQ : 1.1;
   const xrButton = document.getElementById("xr-ar");
   const recolorQ = Number(Q.get("recolor") ?? 0.6);
   const recolorStrength = Number.isFinite(recolorQ) && recolorQ >= 0 ? recolorQ : 0.6;
@@ -5256,12 +5256,13 @@ async function main() {
     xrFrames++;
     if (pose && !placed?.locked) {
       const entry = currentCam();
-      const dist = scene.orbit.dist * distScale;
+      const dist = scene.orbit.dist;
       const fwd = [entry.view[2], entry.view[6], entry.view[10]];
-      const center = [entry.campos[0] + fwd[0] * dist, entry.campos[1] + fwd[1] * dist, entry.campos[2] + fwd[2] * dist];
+      const center = scene.orbit.center;
+      const cam = [center[0] - fwd[0] * dist, center[1] - fwd[1] * dist, center[2] - fwd[2] * dist];
       const hm = pose.transform.matrix;
       const up = scene.orbit.up;
-      const next = place(entry.campos, center, [up[0], up[1], up[2]], [hm[12], hm[13], hm[14]], [-hm[8], -hm[9], -hm[10]], xrDist);
+      const next = place(cam, center, [up[0], up[1], up[2]], [hm[12], hm[13], hm[14]], [-hm[8], -hm[9], -hm[10]], xrDist);
       if (next) {
         next.locked = !pose.emulatedPosition || xrFrames > 30;
         placed = next;
@@ -5382,7 +5383,7 @@ async function main() {
           stage.occDebug = occDebugBox.checked;
           stage.renderScale = xrRenderScale;
           const sortOutside = renderer.sortEvery;
-          renderer.sortEvery = 1;
+          renderer.sortEvery = Math.min(sortOutside, 2);
           stage.session.addEventListener("end", () => {
             xr = null;
             placed = null;
