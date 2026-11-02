@@ -249,7 +249,7 @@
   <button id="play" type="button">▶/❚❚</button>
   <button id="hold" type="button" data-de="Anhalten">Hold</button>
   <select id="scene" hidden></select>
-  <label><span data-de="Hintergrund">Background</span> <input id="bg" type="color" value="#000000"></label>
+  <label><span data-de="Hintergrund">Background</span> <input id="bg" type="color" value="#d9d4cc"></label>
   <span id="occ-box" hidden><input id="occ" type="checkbox" checked></span>
   <span id="occ-debug-box" hidden><input id="occ-debug" type="checkbox"></span>
   <details id="grade-box" hidden>
@@ -290,6 +290,14 @@
   // Quest deep-link goes straight to controls.
   if (new URLSearchParams(location.search).has('quest')) showLanding(false);
   document.getElementById('quest-link').href = location.pathname.replace(/\/?$/, '/') + '?quest=1';
+</script>
+<script>
+  // Planar shadows only read on a light floor; don't keep a leftover black desktop bg.
+  try {
+    const k = 'p5.bg';
+    const v = (localStorage.getItem(k) || '').toLowerCase();
+    if (!v || v === '#000000' || v === '#000') localStorage.setItem(k, '#d9d4cc');
+  } catch {}
 </script>
 <script type="module" src="./main.js"></script>
 </body>
