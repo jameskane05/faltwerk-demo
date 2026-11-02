@@ -673,7 +673,8 @@ fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
 @fragment
 fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
   let dims = vec2i(textureDimensions(src));
-  var texel = clamp(vec2i(p.xy) - vec2i(U.origin), vec2i(0), dims - vec2i(1));
+  var shadowTexel = clamp(vec2i(p.xy) - vec2i(U.origin), vec2i(0), dims - vec2i(1));
+  var texel = shadowTexel;
   var hdims = vec2f(dims);
   var c = textureLoad(src, texel, 0);
   if (U.rs.z > 0.5) {                            // splats rendered below the eye resolution: bilinear upscale
@@ -685,11 +686,13 @@ fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
     let c01 = textureLoad(src, clamp(i0 + vec2i(0, 1), vec2i(0), mx), 0);
     let c11 = textureLoad(src, clamp(i0 + vec2i(1, 1), vec2i(0), mx), 0);
     c = mix(mix(c00, c10, w.x), mix(c01, c11, w.x), w.y);
+    let srcPx = vec2i(floor(f + vec2f(0.5)));
+    shadowTexel = clamp(srcPx, vec2i(0), mx);
     texel = vec2i(q);
     hdims = vec2f(dims) / U.rs.xy;
   }
   var rgb = graded(c, U.grade);
-  let sa = shadowBlur(texel);
+  let sa = shadowBlur(shadowTexel);
   var a = select(1.0, clamp(c.a, 0.0, 1.0) + (1.0 - clamp(c.a, 0.0, 1.0)) * sa, U.flags.x > 0.5);
   if (U.flags.x < 0.5) { rgb = rgb + (1.0 - clamp(c.a, 0.0, 1.0)) * (1.0 - sa) * vec3f(0.0); }
   if (U.hud.z > 0.5) {
@@ -5192,9 +5195,9 @@ async function main() {
     playing = !playing;
   });
   const xrScaleQ = qnum("xrscale", 1, 1);
-  const xrRenderScale = Math.min(1, Math.max(0.3, qnum("xrrs", 0.55, 1)));
+  const xrRenderScale = Math.min(1, Math.max(0.3, qnum("xrrs", 1, 1)));
   const xrLayerScale = Number.isFinite(xrScaleQ) && xrScaleQ > 0 ? xrScaleQ : 1;
-  const xrFovQ = Q.get("foveation") ?? (QUEST ? "1" : null);
+  const xrFovQ = Q.get("foveation");
   const xrOpts = {
     foveation: xrFovQ !== null && Number.isFinite(Number(xrFovQ)) ? Math.min(1, Math.max(0, Number(xrFovQ))) : void 0,
     frameRate: qnum("hz", 72, 0) || void 0
@@ -5273,7 +5276,8 @@ async function main() {
       d.head = head2;
       if (!d.placed) d.place(head2, [-hm[8], -hm[9], -hm[10]]);
     }
-    const deskOn = !!desk?.placed && !!document.getElementById("desk")?.checked;
+    const deskToggle = document.getElementById("desk");
+    const deskOn = !!desk?.placed && (!deskToggle || deskToggle.checked);
     if (placed?.locked) stage.pinch(frame, placed, time, deskOn ? desk : null);
     if (g && inflight >= 2) {
       gpuBound++;
@@ -5377,12 +5381,15 @@ async function main() {
           stage.occlude = occBox.checked;
           stage.occDebug = occDebugBox.checked;
           stage.renderScale = xrRenderScale;
+          const sortOutside = renderer.sortEvery;
+          renderer.sortEvery = 1;
           stage.session.addEventListener("end", () => {
             xr = null;
             placed = null;
             xrFrames = 0;
             rafOn = true;
             lastNow = 0;
+            renderer.sortEvery = sortOutside;
             if (desk) desk.placed = false;
             showGrade();
             xrButton.textContent = "MR";
