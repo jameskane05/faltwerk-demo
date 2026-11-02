@@ -186,7 +186,6 @@
     </div>
     <div class="perf" aria-live="polite">
       <div><span>FPS</span><strong id="stat-fps">…</strong></div>
-      <div><span>Time</span><strong id="stat-time">…</strong></div>
       <div><span>Splats</span><strong id="stat-splats">…</strong></div>
       <div><span>GPU</span><strong id="stat-gpu">…</strong></div>
       <div><span>VRAM</span><strong id="stat-vram">…</strong></div>
@@ -289,7 +288,6 @@
   // Format: "… · 60 fps · section 0 t=12.34 · 135000 splats (12000 visible) · GPU 4.20 ms · 256 MiB"
   const els = {
     fps: document.getElementById('stat-fps'),
-    time: document.getElementById('stat-time'),
     splats: document.getElementById('stat-splats'),
     gpu: document.getElementById('stat-gpu'),
     vram: document.getElementById('stat-vram'),
@@ -298,13 +296,11 @@
   const applyStats = (text) => {
     if (!text || /lade|loading|Fehler|Error|GPU-Fehler/i.test(text)) return;
     const fps = text.match(/(\d+)\s*fps/i);
-    const time = text.match(/\bt=([\d.]+)/i);
     const splats = text.match(/([\d,]+)\s*splats/i);
     const visible = text.match(/\(([\d,]+)\s*(?:sichtbar|visible)\)/i);
     const gpu = text.match(/GPU\s+([\d.]+)\s*ms/i);
     const vram = text.match(/([\d.]+)\s*MiB/i);
     if (fps) els.fps.textContent = fps[1];
-    if (time) els.time.textContent = Number(time[1]).toFixed(2) + ' s';
     if (splats) {
       const n = splats[1].replace(/,/g, '');
       els.splats.textContent = visible
