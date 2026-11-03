@@ -3727,15 +3727,16 @@ var ImmersiveAR = class _ImmersiveAR {
   }
   static async start(device, scaleFactor = 1, opts = {}) {
     const gpuDepthApi = typeof XRGPUBinding.prototype.getDepthInformation === "function";
-    const init = {
-      requiredFeatures: ["webgpu"],
-      optionalFeatures: ["local-floor", "hand-tracking", "depth-sensing"],
-      depthSensing: {
+    const optionalFeatures = ["local-floor", "hand-tracking"];
+    const init = { requiredFeatures: ["webgpu"], optionalFeatures };
+    if (opts.depth) {
+      optionalFeatures.push("depth-sensing");
+      init.depthSensing = {
         usagePreference: gpuDepthApi ? ["gpu-optimized", "cpu-optimized"] : ["cpu-optimized", "gpu-optimized"],
         dataFormatPreference: ["float32", "unsigned-short", "luminance-alpha"],
         matchDepthView: false
-      }
-    };
+      };
+    }
     const session = await requestWithTimeout("immersive-ar", init, 6e3);
     try {
       const binding = new XRGPUBinding(session, device);
@@ -4995,7 +4996,7 @@ async function main() {
     if (!playing || switching || total <= 0) return;
     const prev = Math.floor(playFrames / total);
     playFrames += dt * scene.fps;
-    if (!holding && Math.floor(playFrames / total) !== prev) void advance();
+    if (!holding && !xr && Math.floor(playFrames / total) !== prev) void advance();
   };
   const fixedT = Q.has("t") ? Number(Q.get("t")) : null;
   let playing = !Q.has("pause") && fixedT === null;
@@ -5199,7 +5200,7 @@ async function main() {
   const xrLayerScale = Number.isFinite(xrScaleQ) && xrScaleQ > 0 ? xrScaleQ : 1;
   const xrFovQ = Q.get("foveation");
   const xrOpts = {
-    foveation: xrFovQ !== null && Number.isFinite(Number(xrFovQ)) ? Math.min(1, Math.max(0, Number(xrFovQ))) : void 0,
+    foveation: xrFovQ !== null && Number.isFinite(Number(xrFovQ)) ? Math.min(1, Math.max(0, Number(xrFovQ))) : 0,
     frameRate: qnum("hz", 72, 0) || void 0
   };
   const hudOn = qnum("hud", 0, 0) > 0;
@@ -5242,6 +5243,13 @@ async function main() {
     const stage = xr;
     if (!stage) return;
     stage.session.requestAnimationFrame(onXR);
+    if (!stage.fovLock) {
+      stage.fovLock = true;
+      try {
+        stage.layer.fixedFoveation = xrOpts.foveation;
+      } catch {
+      }
+    }
     if (gpuError) {
       overlay.textContent = tr("GPU-Fehler: ", "GPU error: ") + gpuError;
       window.__p5.error = gpuError;
@@ -5278,7 +5286,7 @@ async function main() {
     const deskToggle = document.getElementById("desk");
     const deskOn = !!desk?.placed && (!deskToggle || deskToggle.checked);
     if (placed?.locked) stage.pinch(frame, placed, time, deskOn ? desk : null);
-    if (g && inflight >= 2) {
+    if (g && inflight >= 4) {
       gpuBound++;
       bumpPlay(dt);
     } else if (g && pose && placed) {
@@ -5339,7 +5347,7 @@ async function main() {
   const xrLog = { at: 0, busy: 0, stalls: 0, occ: 0 };
   const occBox = document.getElementById("occ");
   const occDebugBox = document.getElementById("occ-debug");
-  occBox.checked = setting("occlude") !== "0";
+  occBox.checked = setting("occlude") === "1";
   occDebugBox.checked = setting("occdebug") === "1";
   occBox.addEventListener("change", () => {
     saveSetting("occlude", occBox.checked ? "1" : "0");
@@ -5376,7 +5384,7 @@ async function main() {
       xrButton.textContent = "\u2026";
       void (async () => {
         try {
-          const stage = await ImmersiveAR.start(device, xrLayerScale, xrOpts);
+          const stage = await ImmersiveAR.start(device, xrLayerScale, { ...xrOpts, depth: occBox.checked });
           stage.occlude = occBox.checked;
           stage.occDebug = occDebugBox.checked;
           stage.renderScale = xrRenderScale;
